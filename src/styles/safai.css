@@ -1,0 +1,247 @@
+/* Safai — design system */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  /* Surfaces */
+  --safai-bg-0: oklch(0.16 0.008 240);       /* app background */
+  --safai-bg-1: oklch(0.19 0.009 240);       /* sidebar */
+  --safai-bg-2: oklch(0.22 0.010 240);       /* card */
+  --safai-bg-3: oklch(0.26 0.010 240);       /* card hover / pill */
+  --safai-bg-4: oklch(0.30 0.010 240);       /* input, raised */
+
+  /* Text */
+  --safai-fg-0: oklch(0.97 0.005 240);       /* primary text */
+  --safai-fg-1: oklch(0.78 0.008 240);       /* secondary text */
+  --safai-fg-2: oklch(0.58 0.010 240);       /* tertiary / placeholder */
+  --safai-fg-3: oklch(0.42 0.010 240);       /* disabled / line */
+
+  /* Borders */
+  --safai-line: oklch(0.30 0.010 240 / 0.7);
+  --safai-line-strong: oklch(0.38 0.012 240);
+
+  /* Accents */
+  --safai-cyan: oklch(0.82 0.14 200);        /* primary action */
+  --safai-cyan-dim: oklch(0.82 0.14 200 / 0.14);
+  --safai-mint: oklch(0.84 0.14 162);        /* safe / success */
+  --safai-mint-dim: oklch(0.84 0.14 162 / 0.14);
+  --safai-amber: oklch(0.82 0.14 80);        /* warning */
+  --safai-amber-dim: oklch(0.82 0.14 80 / 0.14);
+  --safai-coral: oklch(0.76 0.16 25);        /* danger */
+  --safai-coral-dim: oklch(0.76 0.16 25 / 0.14);
+  --safai-lilac: oklch(0.78 0.12 300);       /* privacy */
+  --safai-lilac-dim: oklch(0.78 0.12 300 / 0.14);
+
+  /* Category hues (for treemap / pies) */
+  --safai-h-apps:      oklch(0.78 0.13 235);
+  --safai-h-media:     oklch(0.80 0.14 50);
+  --safai-h-docs:      oklch(0.78 0.12 140);
+  --safai-h-dev:       oklch(0.76 0.13 300);
+  --safai-h-system:    oklch(0.66 0.02 240);
+  --safai-h-junk:      oklch(0.68 0.10 30);
+
+  /* Radius + shadow */
+  --safai-r-xs: 6px;
+  --safai-r-sm: 10px;
+  --safai-r-md: 14px;
+  --safai-r-lg: 20px;
+  --safai-shadow: 0 1px 0 oklch(1 0 0 / 0.04) inset, 0 12px 40px oklch(0 0 0 / 0.35);
+
+  /* Type */
+  --safai-font-display: 'Inter Tight', ui-sans-serif, system-ui, sans-serif;
+  --safai-font-body: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --safai-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* Reset inside artboards */
+.safai-root, .safai-root * {
+  box-sizing: border-box;
+}
+.safai-root {
+  font-family: var(--safai-font-body);
+  color: var(--safai-fg-0);
+  background: var(--safai-bg-0);
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.005em;
+}
+.safai-root h1, .safai-root h2, .safai-root h3 {
+  font-family: var(--safai-font-display);
+  margin: 0;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+.safai-root .mono { font-family: var(--safai-font-mono); font-feature-settings: 'tnum'; }
+.safai-root .num { font-variant-numeric: tabular-nums; }
+
+/* Buttons */
+.safai-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--safai-font-body);
+  font-size: 13px;
+  font-weight: 500;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--safai-r-sm);
+  border: 1px solid var(--safai-line);
+  background: var(--safai-bg-3);
+  color: var(--safai-fg-0);
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .05s;
+  white-space: nowrap;
+}
+.safai-btn:hover { background: var(--safai-bg-4); }
+.safai-btn:active { transform: translateY(0.5px); }
+.safai-btn--ghost { background: transparent; }
+.safai-btn--primary {
+  background: var(--safai-cyan);
+  color: oklch(0.18 0.02 240);
+  border-color: transparent;
+  font-weight: 600;
+}
+.safai-btn--primary:hover { background: oklch(0.86 0.14 200); }
+.safai-btn--danger {
+  background: var(--safai-coral-dim);
+  color: var(--safai-coral);
+  border-color: oklch(0.76 0.16 25 / 0.3);
+}
+.safai-btn--big {
+  height: 44px;
+  padding: 0 22px;
+  font-size: 14px;
+  border-radius: var(--safai-r-md);
+}
+
+/* Card */
+.safai-card {
+  background: var(--safai-bg-2);
+  border: 1px solid var(--safai-line);
+  border-radius: var(--safai-r-md);
+}
+.safai-card--hover:hover {
+  background: var(--safai-bg-3);
+  border-color: var(--safai-line-strong);
+}
+
+/* Pill badge */
+.safai-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--safai-bg-3);
+  color: var(--safai-fg-1);
+  letter-spacing: 0.01em;
+}
+.safai-pill .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+}
+
+/* Input */
+.safai-input {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--safai-r-sm);
+  background: var(--safai-bg-0);
+  border: 1px solid var(--safai-line);
+  color: var(--safai-fg-0);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.safai-input:focus { border-color: var(--safai-cyan); }
+
+/* Checkbox */
+.safai-check {
+  width: 16px; height: 16px; border-radius: 5px;
+  border: 1.5px solid var(--safai-line-strong);
+  background: var(--safai-bg-0);
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background .1s, border-color .1s;
+}
+.safai-check--on {
+  background: var(--safai-cyan);
+  border-color: var(--safai-cyan);
+  color: oklch(0.18 0.02 240);
+}
+.safai-check--mixed {
+  background: var(--safai-cyan);
+  border-color: var(--safai-cyan);
+}
+.safai-check--mixed::after {
+  content: ''; width: 8px; height: 2px; background: oklch(0.18 0.02 240); border-radius: 1px;
+}
+
+/* Progress bar */
+.safai-bar {
+  height: 4px; border-radius: 2px; background: var(--safai-bg-3);
+  overflow: hidden;
+}
+.safai-bar__fill {
+  height: 100%; border-radius: 2px;
+  background: var(--safai-cyan);
+}
+
+/* Scrollbars hidden inside artboards */
+.safai-root ::-webkit-scrollbar { width: 8px; height: 8px; }
+.safai-root ::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 0.08); border-radius: 4px;
+}
+.safai-root ::-webkit-scrollbar-track { background: transparent; }
+
+/* Divider */
+.safai-div { height: 1px; background: var(--safai-line); }
+
+/* Subtle sheen for hero surfaces */
+.safai-sheen {
+  background:
+    radial-gradient(1200px 400px at 20% -10%, oklch(0.82 0.14 200 / 0.10), transparent 60%),
+    radial-gradient(800px 400px at 100% 110%, oklch(0.78 0.12 300 / 0.10), transparent 60%),
+    var(--safai-bg-0);
+}
+
+/* Mascot bubble animation (used in hero + scan) */
+@keyframes safai-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+.safai-mascot-float { animation: safai-float 4s ease-in-out infinite; }
+
+/* Scan sweep */
+@keyframes safai-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* Skeleton shimmer — used while data is loading */
+@keyframes safai-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Spin — used on refresh icons during in-flight rescans */
+@keyframes safai-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.safai-spin { animation: safai-spin 0.9s linear infinite; transform-origin: center; }
+
+/* Subtle stripe placeholder */
+.safai-stripe {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    oklch(1 0 0 / 0.025) 0 8px,
+    transparent 8px 16px
+  );
+}
