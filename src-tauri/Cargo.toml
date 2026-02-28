@@ -18,6 +18,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# — cross-platform disk telemetry. `default-features=false` so we
+# don't drag in the component / network / user refresh sources we never
+# sample — every unused refresh is a syscall per tick.
+sysinfo = { version = "0.32", default-features = false, features = ["disk"] }
 
 [profile.release]
 panic = "abort"
