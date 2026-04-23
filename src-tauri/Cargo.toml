@@ -16,16 +16,35 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
+# — auto-updater. Shipped as a plugin so the JS side can call
+# `check()` / `downloadAndInstall()` through `@tauri-apps/plugin-updater`
+# rather than us re-implementing signature verification.
+tauri-plugin-updater = "2"
+# — process relaunch after an update completes. Ships the
+# `relaunch()` IPC used by `UpdateBanner` to reboot the app into the
+# freshly-downloaded bundle.
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# — cross-platform disk telemetry. `default-features=false` so we
+# — cross-platform disk telemetry. flips on `system` for
+# CPU / memory / process sampling. We keep `default-features=false` so we
 # don't drag in the component / network / user refresh sources we never
-# sample — every unused refresh is a syscall per tick.
-sysinfo = { version = "0.32", default-features = false, features = ["disk"] }
+# sample — every unused refresh is a syscall per tick in the streaming
+# loop.
+sysinfo = { version = "0.32", default-features = false, features = ["disk", "system"] }
 # — streaming filesystem walker. jwalk shells out to rayon internally
 # so a home-dir scan stays parallel; we check atomics inside the per-dir
 # closure so pause/cancel stop work within the next directory batch.
 jwalk = "0.8"
+# — duplicate finder. `rayon` drives per-group parallel hashing,
+# `blake3` is a cryptographic-strength hash that's still faster than
+# memcpy on most CPUs (SIMD vectorised). Using the default feature set
+# (includes `std` + SIMD autodetect).
+rayon = "1.10"
+blake3 = "1.5"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 panic = "abort"
