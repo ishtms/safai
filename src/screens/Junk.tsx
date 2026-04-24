@@ -29,7 +29,7 @@ import {
   type DeleteResult,
   type GraveyardStats,
 } from '../lib/cleaner';
-import { formatBytes, formatCount, formatRelativeTime } from '../lib/format';
+import { formatBytes, formatCount, formatRelativeTime, truncateMiddle } from '../lib/format';
 import { useFlashMood } from '../lib/moods';
 import type { SudsMood } from '../components/Suds';
 
@@ -735,7 +735,7 @@ function CategoryRow(props: {
                     }}
                     title={row.path}
                   >
-                    {row.path}
+                    {truncateMiddle(row.path, 80)}
                   </div>
                   <div
                     style={{ 'font-size': '10px', color: 'var(--safai-fg-3)', 'margin-top': '2px' }}
@@ -859,11 +859,15 @@ function PreviewCard(props: { cat: JunkCategoryReport; row: JunkPathDetail }) {
       </div>
       <div
         class="mono"
+        title={props.row.path}
         style={{
           'font-size': '10px',
           color: 'var(--safai-fg-2)',
           'margin-bottom': '14px',
           'word-break': 'break-all',
+          'max-height': '60px',
+          'overflow-y': 'auto',
+          'line-height': 1.4,
         }}
       >
         {props.row.path}

@@ -38,6 +38,7 @@ import {
   formatBytes,
   formatCount,
   splitBytes,
+  truncateMiddle,
 } from '../lib/format';
 
 // large & old. scatter plot w/ log-size Y + log-idle-days X so you spot
@@ -1199,13 +1200,14 @@ function FilesTable(props: {
                 style={{
                   'font-size': '12px',
                   color: 'var(--safai-fg-1)',
+                  'min-width': 0,
                   'white-space': 'nowrap',
                   overflow: 'hidden',
                   'text-overflow': 'ellipsis',
                 }}
                 title={f.path}
               >
-                {f.path}
+                {truncateMiddle(f.path, 80)}
               </div>
               <div
                 class="num"

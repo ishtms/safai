@@ -1,7 +1,7 @@
 import { For, Show, createMemo } from 'solid-js';
 import { Suds } from './Suds';
 import { Icon } from './Icon';
-import { formatBytes, formatCount } from '../lib/format';
+import { formatBytes, formatCount, truncateMiddle } from '../lib/format';
 import type { DeletePlan } from '../lib/cleaner';
 
 // confirm step between previewDelete and commitDelete. shows bytes, count,
@@ -116,6 +116,7 @@ export function ConfirmDeleteModal(props: {
                   padding: '6px 0',
                   'font-size': '11px',
                   color: it.protected ? 'var(--safai-fg-3)' : 'var(--safai-fg-1)',
+                  'min-width': 0,
                 }}
                 title={it.protected ? (it.protectedReason ?? 'skipped') : it.path}
               >
@@ -128,15 +129,16 @@ export function ConfirmDeleteModal(props: {
                   class="mono"
                   style={{
                     flex: 1,
+                    'min-width': 0,
                     'white-space': 'nowrap',
                     overflow: 'hidden',
                     'text-overflow': 'ellipsis',
                     'text-decoration': it.protected ? 'line-through' : 'none',
                   }}
                 >
-                  {it.path}
+                  {truncateMiddle(it.path, 70)}
                 </span>
-                <span class="num" style={{ 'font-size': '11px' }}>
+                <span class="num" style={{ 'font-size': '11px', 'flex-shrink': 0 }}>
                   {it.protected ? 'skipped' : formatBytes(it.bytes)}
                 </span>
               </div>
