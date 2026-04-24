@@ -108,7 +108,7 @@ export function labelForCadence(c: ScheduleCadence | null): string {
 // unix seconds -> short human string. null -> "-" so ui can interpolate
 // without branching
 export function formatTimestamp(t: number | null): string {
-  if (t == null) return '—';
+  if (t == null) return '-';
   const d = new Date(t * 1000);
   return d.toLocaleString();
 }
@@ -116,7 +116,7 @@ export function formatTimestamp(t: number | null): string {
 // "in 3h 12m" / "any moment now" / "-". stays here (not format.ts)
 // because the thresholds are scheduler-specific
 export function formatRelativeSecs(s: number | null): string {
-  if (s == null) return '—';
+  if (s == null) return '-';
   if (s <= 0) return 'any moment now';
   if (s < 60) return `in ${Math.ceil(s)}s`;
   const m = Math.floor(s / 60);

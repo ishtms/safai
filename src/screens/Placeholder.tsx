@@ -67,7 +67,7 @@ export function Placeholder() {
             </h2>
             <div style={{ 'font-size': '14px', color: 'var(--safai-fg-1)', 'line-height': 1.6 }}>
               The design system, shell, sidebar, and routing are live. Each sidebar entry is wired
-              up. The actual screen content lands in its dedicated module — see <code class="mono">roadmap.md</code>.
+              up. The actual screen content lands in its dedicated module - see <code class="mono">roadmap.md</code>.
             </div>
           </div>
         </div>

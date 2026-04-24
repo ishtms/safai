@@ -120,7 +120,7 @@ export default function Junk() {
     try {
       const r = await purgeGraveyard();
       setRestoreMessage(
-        `Emptied Safai trash — freed ${formatBytes(r.bytesFreed)} across ${formatCount(
+        `Emptied Safai trash - freed ${formatBytes(r.bytesFreed)} across ${formatCount(
           r.purged.length,
         )} batch${r.purged.length === 1 ? '' : 'es'}.`,
       );
@@ -578,7 +578,7 @@ function SelectAllBar(props: { total: number; selected: number; loading: boolean
       </div>
       <span style={{ 'font-size': '12px', color: 'var(--safai-fg-1)' }}>
         Select all ·{' '}
-        <span class="num">{props.loading ? '—' : formatBytes(props.selected)}</span>{' '}
+        <span class="num">{props.loading ? '-' : formatBytes(props.selected)}</span>{' '}
         of <span class="num">{formatBytes(props.total)}</span>
       </span>
       <div style={{ flex: 1 }} />
@@ -761,7 +761,7 @@ function CategoryRow(props: {
                 color: 'var(--safai-fg-3)',
               }}
             >
-              Too many items to list individually — full roll-up shown above.
+              Too many items to list individually - full roll-up shown above.
             </div>
           </Show>
         </div>
@@ -908,7 +908,7 @@ function sudsCopy(cat: JunkCategoryReport | undefined, report: JunkReport | unde
       report.totalBytes,
     )} of clutter across ${formatCount(report.totalItems)} items. Tap a row to peek inside.`;
   }
-  return 'Nothing obvious to sweep here. Your caches are tidy — nice.';
+  return 'Nothing obvious to sweep here. Your caches are tidy - nice.';
 }
 
 function SkeletonRow() {

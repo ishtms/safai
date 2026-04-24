@@ -222,7 +222,7 @@ pub fn build_tree(root: &Path, max_depth: usize) -> Result<TreeNode, TreeBuildEr
     for entry in walker {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
-        // jwalk's first yield is the root itself — skip.
+        // jwalk's first yield is the root itself - skip.
         if path == root {
             continue;
         }
@@ -257,7 +257,7 @@ pub(super) fn insert_file(
     bytes: u64,
     max_depth: usize,
 ) {
-    // Always credit the root with this file's bytes — keeps `tree.bytes`
+    // Always credit the root with this file's bytes - keeps `tree.bytes`
     // equal to the true subtree total regardless of depth cap.
     root.bytes = root.bytes.saturating_add(bytes);
     root.file_count = root.file_count.saturating_add(1);
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(a.bytes, 1000);
         assert_eq!(a.children.len(), 1);
         assert_eq!(a.children[0].name, "b");
-        // "b" has the bytes but no children — they were folded in.
+        // "b" has the bytes but no children - they were folded in.
         assert_eq!(a.children[0].bytes, 1000);
         assert!(a.children[0].children.is_empty());
     }
@@ -393,7 +393,7 @@ mod tests {
         {
             let tmp = tempfile::tempdir().unwrap();
             write_file(tmp.path(), "real/file.bin", 100);
-            // Create a symlink pointing back at the root — would loop
+            // Create a symlink pointing back at the root - would loop
             // without `follow_links(false)`.
             let link = tmp.path().join("loop");
             std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
@@ -472,7 +472,7 @@ mod tests {
         let elapsed = started.elapsed();
         assert_eq!(t.file_count, 10_000);
         assert_eq!(t.bytes, 10_000);
-        // Very loose ceiling — on a modern laptop this is well under 1s.
+        // Very loose ceiling - on a modern laptop this is well under 1s.
         // 10s is enough slack that a loaded CI box won't flake.
         assert!(
             elapsed.as_secs() < 10,

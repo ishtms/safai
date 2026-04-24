@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import solid from 'vite-plugin-solid';
 
-// @ts-expect-error — process is provided by Node when Vite runs
+// @ts-expect-error - process is provided by Node when Vite runs
 const host = process.env.TAURI_DEV_HOST as string | undefined;
 
 export default defineConfig({

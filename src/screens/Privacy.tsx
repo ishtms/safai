@@ -358,7 +358,7 @@ function SummaryBar(props: { totalAvailable: number; selected: number; loading: 
       <Icon name="shield" size={14} color="var(--safai-cyan)" />
       <span style={{ 'font-size': '12px', color: 'var(--safai-fg-1)' }}>
         Across all installed browsers:{' '}
-        <span class="num">{props.loading ? '—' : formatBytes(props.selected)}</span>{' '}
+        <span class="num">{props.loading ? '-' : formatBytes(props.selected)}</span>{' '}
         selected of <span class="num">{formatBytes(props.totalAvailable)}</span> available
       </span>
     </div>
@@ -563,7 +563,7 @@ function SidePane(props: { report: PrivacyReport | undefined; selectedBytes: num
   const available = () => props.report?.browsers.filter((b) => b.available) ?? [];
   const bucketNote = () => {
     const n = available().length;
-    if (n === 0) return 'No installed browsers detected — install Chrome, Edge, Firefox, or Safari to get going.';
+    if (n === 0) return 'No installed browsers detected - install Chrome, Edge, Firefox, or Safari to get going.';
     if (props.selectedBytes === 0) {
       return `Found ${n} browser${n === 1 ? '' : 's'}. Tick categories on the left; safe choices (caches, sessions, local storage) are pre-selected.`;
     }

@@ -48,7 +48,7 @@ export function SafaiSidebar() {
             color: 'var(--safai-cyan)',
           }}
         >
-          v0.1
+          v0.2
         </div>
       </div>
 
@@ -114,7 +114,7 @@ function DiskFooter(props: { volume: Volume | null; loading: boolean; error: unk
             }}
             title={props.volume?.mountPoint ?? ''}
           >
-            {props.loading ? '—' : props.volume?.name ?? 'No disk'}
+            {props.loading ? '-' : props.volume?.name ?? 'No disk'}
           </span>
           <span class="num" style={{ 'flex-shrink': 0 }}>
             {props.volume ? `${formatBytes(props.volume.freeBytes)} free` : ''}

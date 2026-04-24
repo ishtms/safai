@@ -1319,7 +1319,7 @@ function EmptyState() {
         </div>
         <div style={{ 'font-size': '12px', color: 'var(--safai-fg-2)', 'line-height': 1.5 }}>
           Suds walked your home directory looking for files ≥ 50 MB that you
-          haven't touched in 6 months — and didn't find any worth surfacing.
+          haven't touched in 6 months - and didn't find any worth surfacing.
           Nicely maintained.
         </div>
       </div>

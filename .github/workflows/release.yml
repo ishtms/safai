@@ -5,7 +5,7 @@ name: Release
 # (AppImage + .deb) and attaches them to a draft GitHub release that the
 # maintainer promotes once smoke-tested.
 #
-# Signing / notarization is opt-in via repository secrets — if the
+# Signing / notarization is opt-in via repository secrets - if the
 # secrets aren't present, tauri-action skips signing and still produces
 # an unsigned installer, which is fine for CI validation builds.
 
@@ -80,7 +80,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing + notarization. Leave unset in forks — the
+          # macOS signing + notarization. Leave unset in forks - the
           # build still produces an unsigned .dmg / .app for testing.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -91,7 +91,7 @@ jobs:
           # Windows Authenticode.
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          # Updater signing — `tauri signer generate` output. The public
+          # Updater signing - `tauri signer generate` output. The public
           # half is baked into `tauri.conf.json::plugins.updater.pubkey`;
           # the private half lives only here, as a secret.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -103,9 +103,9 @@ jobs:
             See the CHANGELOG for details. Signed installers are attached below.
 
             Installers:
-            - macOS — `.dmg` (universal)
-            - Windows — `.msi` + `.exe` (NSIS)
-            - Linux — `.AppImage` + `.deb`
+            - macOS - `.dmg` (universal)
+            - Windows - `.msi` + `.exe` (NSIS)
+            - Linux - `.AppImage` + `.deb`
 
             Auto-update: launch the existing Safai and accept the "Update and relaunch" banner.
           releaseDraft: true

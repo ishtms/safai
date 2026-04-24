@@ -814,7 +814,7 @@ function EmptyState() {
         </div>
         <div style={{ 'font-size': '12px', color: 'var(--safai-fg-2)', 'line-height': 1.5 }}>
           Suds walked your home directory, grouped by size, then by partial
-          hash, then by full blake3 — and didn't find any byte-identical
+          hash, then by full blake3 - and didn't find any byte-identical
           pairs worth cleaning up. Nice.
         </div>
       </div>

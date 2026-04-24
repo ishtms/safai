@@ -357,7 +357,7 @@ function ProcessRowView(props: {
         {props.row.pid}
       </span>
       <span class="num" style={{ 'text-align': 'right' }}>
-        {Number.isNaN(props.row.cpuPercent) ? '—' : `${props.row.cpuPercent.toFixed(1)}%`}
+        {Number.isNaN(props.row.cpuPercent) ? '-' : `${props.row.cpuPercent.toFixed(1)}%`}
       </span>
       <span class="num" style={{ 'text-align': 'right' }}>
         {formatBytes(props.row.memoryBytes)}

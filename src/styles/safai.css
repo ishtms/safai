@@ -1,4 +1,4 @@
-/* Safai — design system */
+/* Safai - design system */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
@@ -224,13 +224,13 @@
   100% { transform: translateX(100%); }
 }
 
-/* Skeleton shimmer — used while data is loading */
+/* Skeleton shimmer - used while data is loading */
 @keyframes safai-shimmer {
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
 
-/* Spin — used on refresh icons during in-flight rescans */
+/* Spin - used on refresh icons during in-flight rescans */
 @keyframes safai-spin {
   0%   { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }

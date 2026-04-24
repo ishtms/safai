@@ -108,7 +108,7 @@ function HeroCard(props: HeroProps) {
       return "Haven't taken a look yet. Hit Rescan and I'll give the place a once-over.";
     }
     if (!hasResults()) {
-      return "All tidy — nothing worth flagging right now. Rescan any time.";
+      return "All tidy - nothing worth flagging right now. Rescan any time.";
     }
     return "Found some stuff worth a second look. Open the categories below or hit Review & clean.";
   };
@@ -174,7 +174,7 @@ function HeroCard(props: HeroProps) {
               'font-variant-numeric': 'tabular-nums',
             }}
           >
-            {props.loading ? '—' : split().value}
+            {props.loading ? '-' : split().value}
           </div>
           <div style={{ 'font-size': '20px', color: 'var(--safai-fg-1)', 'font-weight': 500 }}>
             {split().unit}
@@ -270,7 +270,7 @@ function StackedBar(props: { categories: CategorySummary[]; total: number }) {
               'flex-basis': 0,
               background: `var(${c.colorVar})`,
             }}
-            title={`${c.label} — ${formatBytes(c.bytes)}`}
+            title={`${c.label} - ${formatBytes(c.bytes)}`}
           />
         )}
       </For>

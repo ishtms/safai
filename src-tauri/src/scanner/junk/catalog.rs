@@ -186,7 +186,7 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
             JunkCategorySpec {
                 id: JunkCategoryId::UserCaches,
                 label: "User caches",
-                description: "~/.cache — the XDG cache root. Apps regenerate these.",
+                description: "~/.cache - the XDG cache root. Apps regenerate these.",
                 icon: "broom",
                 hot: false,
                 paths: vec![h(".cache")],
@@ -202,7 +202,7 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
             JunkCategorySpec {
                 id: JunkCategoryId::Trash,
                 label: "Trash",
-                description: "XDG Trash — ~/.local/share/Trash.",
+                description: "XDG Trash - ~/.local/share/Trash.",
                 icon: "trash",
                 hot: false,
                 paths: vec![h(".local/share/Trash")],
@@ -247,7 +247,7 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
             JunkCategorySpec {
                 id: JunkCategoryId::TempFiles,
                 label: "Temp files",
-                description: "%LOCALAPPDATA%\\Temp — per-user scratch.",
+                description: "%LOCALAPPDATA%\\Temp - per-user scratch.",
                 icon: "file",
                 hot: true,
                 paths: vec![h("AppData/Local/Temp")],

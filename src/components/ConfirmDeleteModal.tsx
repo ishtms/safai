@@ -76,7 +76,7 @@ export function ConfirmDeleteModal(props: {
                 {formatCount(props.plan.totalCount)}
               </span>{' '}
               {props.plan.totalCount === 1 ? 'item' : 'items'} to Safai's trash. Nothing
-              is hard-deleted — click Restore on the toolbar to bring them back.
+              is hard-deleted - click Restore on the toolbar to bring them back.
               <Show when={props.plan.protectedCount > 0}>
                 {' '}
                 <span style={{ color: 'var(--safai-amber)' }}>

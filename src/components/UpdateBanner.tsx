@@ -132,7 +132,7 @@ function BannerBody(props: {
   }
   if (s.kind === 'ready') {
     return (
-      <div style={{ 'font-size': '13px' }}>Update installed — restart to apply.</div>
+      <div style={{ 'font-size': '13px' }}>Update installed - restart to apply.</div>
     );
   }
   return null;
