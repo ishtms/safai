@@ -158,7 +158,7 @@ export default function Disk() {
       <SafaiToolbar
         breadcrumb="Overview"
         title="Disk Usage"
-        subtitle="Find out what's really taking up space — every rectangle is a folder."
+        subtitle="Find out what's really taking up space - every rectangle is a folder."
         right={
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
@@ -167,7 +167,7 @@ export default function Disk() {
               onClick={() => void popTo(stack().length - 2)}
               aria-label="Back"
             >
-              <Icon name="refresh" size={12} /> Back
+              <Icon name="arrowLeft" size={12} /> Back
             </button>
             <button
               class="safai-btn safai-btn--ghost"
@@ -403,7 +403,7 @@ function ReconciliationBar(props: {
             width: pct(props.unaccounted),
             background: 'oklch(0.58 0.10 60)',
           }}
-          title={`System & protected: ${formatBytes(props.unaccounted)} — ${systemTip}`}
+          title={`System & protected: ${formatBytes(props.unaccounted)} - ${systemTip}`}
         />
         <div
           style={{
@@ -711,7 +711,7 @@ function TreemapRect(props: {
       title={
         props.disabled
           ? 'Wait for the scan to finish before drilling in'
-          : `${tile.name} — ${formatBytes(tile.bytes)} (${formatCount(tile.fileCount)} files)`
+          : `${tile.name} - ${formatBytes(tile.bytes)} (${formatCount(tile.fileCount)} files)`
       }
       style={{
         position: 'absolute',
@@ -784,7 +784,7 @@ function EmptyCanvas() {
       }}
     >
       <Suds size={80} mood="sleepy" />
-      <div>Nothing to render — this folder is empty.</div>
+      <div>Nothing to render - this folder is empty.</div>
     </div>
   );
 }

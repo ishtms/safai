@@ -109,7 +109,9 @@ pub struct ScanController {
     state: AtomicU8,
     files_scanned: AtomicU64,
     bytes_scanned: AtomicU64,
-    // files that produced a Verdict, "found so far" counter
+    // reclaimable totals, only Safe (regenerable cache) adds here. Found
+    // events fire for the log but don't contribute, user's media/archives
+    // shouldn't show up as freeable space
     flagged_bytes: AtomicU64,
     flagged_items: AtomicU64,
     /// start of the *current* running segment. Some while Running, None
@@ -431,8 +433,14 @@ fn handle_entry<E: Emit>(
     // those files and won't be proposing to clean them
     if matches!(kind, RootKind::User) {
         if let Some(verdict) = classify(&path, size, is_file) {
-            ctrl.flagged_items.fetch_add(1, Ordering::Relaxed);
-            ctrl.flagged_bytes.fetch_add(size, Ordering::Relaxed);
+            // only Safe (regenerable cache) contributes to "you can get back"
+            // totals. Found is a ≥100MB heads-up that still deserves a log
+            // line but isn't guaranteed reclaimable, counting it would claim
+            // user's media/archives as freeable space
+            if matches!(verdict, Verdict::Safe) {
+                ctrl.flagged_items.fetch_add(1, Ordering::Relaxed);
+                ctrl.flagged_bytes.fetch_add(size, Ordering::Relaxed);
+            }
             emit.emit_event(&ScanEvent {
                 handle_id: handle_id.to_string(),
                 kind: match verdict {

@@ -332,7 +332,7 @@ function HeroText(props: { currentPath: string; state: ScanState; isPaused: bool
       case 'cancelled':
         return 'Cancelled.';
       case 'done':
-        return 'All done — packing up.';
+        return 'All done - packing up.';
       case 'running':
       default:
         return 'Rummaging through caches…';
@@ -366,7 +366,7 @@ function HeroText(props: { currentPath: string; state: ScanState; isPaused: bool
         }}
         title={props.currentPath}
       >
-        {truncateMiddle(props.currentPath || '—', 90)}
+        {truncateMiddle(props.currentPath || '-', 90)}
       </div>
     </div>
   );
@@ -375,7 +375,7 @@ function HeroText(props: { currentPath: string; state: ScanState; isPaused: bool
 function StatsRow(props: { progress: ScanProgress; eta: number | null }) {
   const flagged = () => splitBytes(props.progress.flaggedBytes);
   const etaText = () =>
-    props.eta == null ? '—' : formatDuration(props.eta);
+    props.eta == null ? '-' : formatDuration(props.eta);
   return (
     <div
       style={{
@@ -393,7 +393,7 @@ function StatsRow(props: { progress: ScanProgress; eta: number | null }) {
         <CountUp value={props.progress.filesScanned} format={(v) => formatCount(Math.round(v))} />
       </StatCard>
       {/* split into value/unit so we only animate the number */}
-      <StatCard label="Found so far" unit={flagged().unit}>
+      <StatCard label="Reclaimable" unit={flagged().unit}>
         {flagged().value}
       </StatCard>
       <StatCard label="Elapsed" unit="">
@@ -649,7 +649,7 @@ function ErrorCard(props: { message: string; onDismiss: () => void }) {
         </div>
       </div>
       <button class="safai-btn safai-btn--ghost" onClick={props.onDismiss}>
-        <Icon name="x" size={12} /> Back
+        <Icon name="arrowLeft" size={12} /> Back
       </button>
     </div>
   );
