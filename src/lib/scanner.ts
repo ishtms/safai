@@ -33,6 +33,11 @@ export interface SmartScanSummary {
   scannedAt: number | null;
   categories: CategorySummary[];
   mocked: boolean;
+  /** bytes the walker accounted for across user + system roots */
+  bytesAccounted: number;
+  /** primary volume at scan start (sysinfo). zero on pre-v16 caches. */
+  volumeUsedBytes: number;
+  volumeTotalBytes: number;
 }
 
 // smart scan dashboard roll-up. empty fallback outside tauri so ui can
@@ -44,6 +49,9 @@ export function fetchSmartScanSummary(): Promise<SmartScanSummary> {
     scannedAt: null,
     categories: [],
     mocked: true,
+    bytesAccounted: 0,
+    volumeUsedBytes: 0,
+    volumeTotalBytes: 0,
   }));
 }
 
@@ -68,6 +76,9 @@ export interface ScanProgress {
   elapsedMs: number;
   state: ScanState;
   currentPath: string | null;
+  /** primary volume snapshot taken at scan start. zero when unavailable. */
+  volumeUsedBytes: number;
+  volumeTotalBytes: number;
 }
 
 export interface ScanHandle {

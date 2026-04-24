@@ -29,6 +29,42 @@ use serde::Serialize;
 
 use super::classify::{classify, should_sample_scan, Verdict};
 
+// ---------- scan roots ----------
+
+/// how a root should be treated by the walker.
+/// User = run full classify (junk / privacy / malware flagged).
+/// System = count bytes only, skip classify. We don't own files in
+/// /Applications or C:\Windows and shouldn't propose to clean them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootKind {
+    User,
+    System,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanRoot {
+    pub path: PathBuf,
+    pub kind: RootKind,
+}
+
+impl ScanRoot {
+    pub fn user(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into(), kind: RootKind::User }
+    }
+    pub fn system(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into(), kind: RootKind::System }
+    }
+}
+
+/// captured at scan start, reported back in ScanProgress so the UI can
+/// reconcile "bytes we walked" vs "bytes the OS says are used" without
+/// re-querying sysinfo.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VolumeSnapshot {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+}
+
 // ---------- state machine ----------
 
 /// encoded as AtomicU8 on the controller so workers can check with a single
@@ -85,6 +121,11 @@ pub struct ScanController {
     accum_active_ms: AtomicU64,
     last_progress_emit: Mutex<Instant>,
     last_path_seen: Mutex<Option<String>>,
+    /// set once at scan start so progress/done snapshots can report the
+    /// unaccounted gap (volume_used - bytes_scanned) without re-sniffing
+    /// sysinfo on every emit. zero when not captured (tests, sandbox)
+    volume_used_bytes: AtomicU64,
+    volume_total_bytes: AtomicU64,
 }
 
 impl ScanController {
@@ -103,6 +144,22 @@ impl ScanController {
             // immediately since Instant::now() has moved on
             last_progress_emit: Mutex::new(now - PROGRESS_THROTTLE),
             last_path_seen: Mutex::new(None),
+            volume_used_bytes: AtomicU64::new(0),
+            volume_total_bytes: AtomicU64::new(0),
+        }
+    }
+
+    /// set once by start_scan before spawning the walker thread
+    pub fn set_volume_snapshot(&self, snap: VolumeSnapshot) {
+        self.volume_used_bytes.store(snap.used_bytes, Ordering::Relaxed);
+        self.volume_total_bytes.store(snap.total_bytes, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)] // paired with set_volume_snapshot for symmetry, snapshot() already exposes these fields
+    pub fn volume_snapshot(&self) -> VolumeSnapshot {
+        VolumeSnapshot {
+            used_bytes: self.volume_used_bytes.load(Ordering::Relaxed),
+            total_bytes: self.volume_total_bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -165,6 +222,8 @@ impl ScanController {
             elapsed_ms: self.active_elapsed_ms(),
             state: self.state(),
             current_path: self.last_path_seen.lock().ok().and_then(|g| g.clone()),
+            volume_used_bytes: self.volume_used_bytes.load(Ordering::Relaxed),
+            volume_total_bytes: self.volume_total_bytes.load(Ordering::Relaxed),
         }
     }
 }
@@ -216,6 +275,12 @@ pub struct ScanProgress {
     pub elapsed_ms: u64,
     pub state: ScanState,
     pub current_path: Option<String>,
+    /// primary volume's used bytes as reported by sysinfo at scan start.
+    /// pairs with bytes_scanned so the UI can render an "unaccounted" band
+    /// (system files, other users, APFS snapshots) without re-querying.
+    /// zero when not captured (tests, sandbox, sysinfo empty)
+    pub volume_used_bytes: u64,
+    pub volume_total_bytes: u64,
 }
 
 /// tauri's AppHandle impls via a thin adapter in commands.rs, tests use Vec.
@@ -234,7 +299,7 @@ pub trait Emit: Send + Sync {
 /// rayon which assumes OS threads
 pub fn run_scan<E: Emit>(
     handle_id: String,
-    roots: Vec<PathBuf>,
+    roots: Vec<ScanRoot>,
     ctrl: Arc<ScanController>,
     emit: E,
 ) {
@@ -254,11 +319,17 @@ pub fn run_scan<E: Emit>(
 
 fn walk_one<E: Emit>(
     handle_id: &str,
-    root: &Path,
+    root: &ScanRoot,
     ctrl: Arc<ScanController>,
     emit: Arc<E>,
 ) {
-    let walker = jwalk::WalkDir::new(root)
+    // capture root's device id for cross-device guard. if the root doesn't
+    // exist (bare sandbox / unit test for missing path), root_dev stays
+    // None and we don't filter, jwalk will just emit zero entries.
+    let root_dev = root_device_id(&root.path);
+    let kind = root.kind;
+
+    let walker = jwalk::WalkDir::new(&root.path)
         .skip_hidden(false)
         .follow_links(false)
         .process_read_dir({
@@ -281,6 +352,22 @@ fn walk_one<E: Emit>(
                         ScanState::Running => break,
                     }
                 }
+
+                // cross-device guard. on unix, macOS firmlinks
+                // (/System/Volumes/Data <-> /) double-count without this.
+                // also drops external drives, network mounts, tmpfs mounted
+                // inside /var etc. windows: different drive letters are
+                // already different roots so this is a no-op.
+                if let Some(dev) = root_dev {
+                    children.retain(|child_res| {
+                        let Ok(child) = child_res else { return true };
+                        match child.metadata() {
+                            Ok(md) => entry_device_id(&md) == Some(dev),
+                            // can't stat -> keep, walker will skip later
+                            Err(_) => true,
+                        }
+                    });
+                }
             }
         });
 
@@ -301,13 +388,14 @@ fn walk_one<E: Emit>(
         }
 
         let Ok(entry) = entry_res else { continue };
-        handle_entry(handle_id, &entry, &ctrl, emit.as_ref());
+        handle_entry(handle_id, &entry, kind, &ctrl, emit.as_ref());
     }
 }
 
 fn handle_entry<E: Emit>(
     handle_id: &str,
     entry: &jwalk::DirEntry<((), ())>,
+    kind: RootKind,
     ctrl: &ScanController,
     emit: &E,
 ) {
@@ -338,19 +426,24 @@ fn handle_entry<E: Emit>(
         }
     }
 
-    if let Some(verdict) = classify(&path, size, is_file) {
-        ctrl.flagged_items.fetch_add(1, Ordering::Relaxed);
-        ctrl.flagged_bytes.fetch_add(size, Ordering::Relaxed);
-        emit.emit_event(&ScanEvent {
-            handle_id: handle_id.to_string(),
-            kind: match verdict {
-                Verdict::Found => ScanEventKind::Found,
-                Verdict::Safe => ScanEventKind::Safe,
-            },
-            path: path.to_string_lossy().into_owned(),
-            bytes: size,
-            elapsed_ms: ctrl.active_elapsed_ms(),
-        });
+    // System roots (/Applications, /usr, C:\Windows) count toward accounted
+    // bytes but shouldn't trip junk/privacy/malware verdicts - we don't own
+    // those files and won't be proposing to clean them
+    if matches!(kind, RootKind::User) {
+        if let Some(verdict) = classify(&path, size, is_file) {
+            ctrl.flagged_items.fetch_add(1, Ordering::Relaxed);
+            ctrl.flagged_bytes.fetch_add(size, Ordering::Relaxed);
+            emit.emit_event(&ScanEvent {
+                handle_id: handle_id.to_string(),
+                kind: match verdict {
+                    Verdict::Found => ScanEventKind::Found,
+                    Verdict::Safe => ScanEventKind::Safe,
+                },
+                path: path.to_string_lossy().into_owned(),
+                bytes: size,
+                elapsed_ms: ctrl.active_elapsed_ms(),
+            });
+        }
     }
 
     // throttled progress, ~one per PROGRESS_THROTTLE across all workers.
@@ -364,6 +457,34 @@ fn handle_entry<E: Emit>(
             emit.emit_progress(&snap);
         }
     }
+}
+
+/// device id for the root path. unix: st_dev. windows: not implemented
+/// (different drive letters are naturally different roots). None when
+/// the path can't be stat'd - treated as "no guard" so missing paths
+/// walk as before.
+fn root_device_id(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| m.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+#[cfg(unix)]
+fn entry_device_id(md: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(md.dev())
+}
+
+#[cfg(not(unix))]
+fn entry_device_id(_md: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 // ---------- registry (id -> controller) ----------
@@ -519,7 +640,7 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h1".into(),
-            vec![tmp.path().to_path_buf()],
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
             ctrl.clone(),
             ArcEmit(rec),
         );
@@ -551,7 +672,7 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h-cancel".into(),
-            vec![tmp.path().to_path_buf()],
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
             ctrl.clone(),
             ArcEmit(rec),
         );
@@ -581,7 +702,7 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h-big".into(),
-            vec![tmp.path().to_path_buf()],
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
             ctrl,
             ArcEmit(rec.clone()),
         );
@@ -632,7 +753,7 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h-safe".into(),
-            vec![tmp.path().to_path_buf()],
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
             ctrl,
             ArcEmit(rec.clone()),
         );
@@ -652,7 +773,7 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h-done".into(),
-            vec![tmp.path().to_path_buf()],
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
             ctrl.clone(),
             ArcEmit(rec.clone()),
         );
@@ -677,7 +798,7 @@ mod tests {
         let started = Instant::now();
         run_scan(
             "h-prog".into(),
-            vec![tmp.path().to_path_buf()],
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
             ctrl,
             ArcEmit(rec.clone()),
         );
@@ -726,7 +847,7 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h-empty".into(),
-            vec![tmp.path().to_path_buf()],
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
             ctrl.clone(),
             ArcEmit(rec.clone()),
         );
@@ -741,7 +862,7 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h-bad".into(),
-            vec![PathBuf::from("/definitely/does/not/exist/safai-test-root-xyz")],
+            vec![ScanRoot::user(PathBuf::from("/definitely/does/not/exist/safai-test-root-xyz"))],
             ctrl.clone(),
             ArcEmit(rec.clone()),
         );
@@ -772,6 +893,8 @@ mod tests {
             elapsed_ms: 5,
             state: ScanState::Running,
             current_path: Some("/x".into()),
+            volume_used_bytes: 100,
+            volume_total_bytes: 200,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(v.get("filesScanned").is_some());
@@ -780,6 +903,83 @@ mod tests {
         assert!(v.get("flaggedItems").is_some());
         assert!(v.get("elapsedMs").is_some());
         assert!(v.get("currentPath").is_some());
+        assert!(v.get("volumeUsedBytes").is_some());
+        assert!(v.get("volumeTotalBytes").is_some());
         assert_eq!(v["state"], "running");
+    }
+
+    #[test]
+    fn system_root_skips_classify_but_counts_bytes() {
+        // large file at a path that would normally hit FOUND verdict.
+        // Under RootKind::System it should still count toward bytes but
+        // not produce a Found event.
+        let tmp = tempfile::tempdir().unwrap();
+        let big = tmp.path().join("big.bin");
+        fs::File::create(&big)
+            .unwrap()
+            .set_len(super::super::classify::FOUND_MIN_BYTES + 1024)
+            .unwrap();
+
+        let ctrl = Arc::new(ScanController::new());
+        let rec = Arc::new(ArcRecorder::default());
+        run_scan(
+            "h-sys".into(),
+            vec![ScanRoot::system(tmp.path().to_path_buf())],
+            ctrl.clone(),
+            ArcEmit(rec.clone()),
+        );
+
+        let snap = ctrl.snapshot();
+        assert_eq!(snap.files_scanned, 1);
+        assert!(snap.bytes_scanned >= super::super::classify::FOUND_MIN_BYTES);
+        assert_eq!(snap.flagged_items, 0, "system roots must not classify");
+        let events = rec.events.lock().unwrap();
+        let found_or_safe = events
+            .iter()
+            .filter(|e| matches!(e.kind, ScanEventKind::Found | ScanEventKind::Safe))
+            .count();
+        assert_eq!(found_or_safe, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_subdir_does_not_abort_walk() {
+        // chmod 000 an inner dir, walker must still count the sibling
+        // file and emit done rather than bail on the permission error
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        make_tree(tmp.path(), &[("visible/a.bin", 128), ("locked/b.bin", 256)]);
+        let locked = tmp.path().join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let ctrl = Arc::new(ScanController::new());
+        let rec = Arc::new(ArcRecorder::default());
+        run_scan(
+            "h-denied".into(),
+            vec![ScanRoot::user(tmp.path().to_path_buf())],
+            ctrl.clone(),
+            ArcEmit(rec.clone()),
+        );
+
+        // restore so tempdir cleanup doesn't fail
+        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o755));
+
+        let snap = ctrl.snapshot();
+        // visible sibling must be counted even though locked/ errored
+        assert!(snap.files_scanned >= 1, "got {}", snap.files_scanned);
+        assert!(rec.done.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn volume_snapshot_roundtrips_to_progress() {
+        let ctrl = ScanController::new();
+        ctrl.set_volume_snapshot(VolumeSnapshot {
+            used_bytes: 1_000,
+            total_bytes: 2_000,
+        });
+        let snap = ctrl.snapshot();
+        assert_eq!(snap.volume_used_bytes, 1_000);
+        assert_eq!(snap.volume_total_bytes, 2_000);
     }
 }

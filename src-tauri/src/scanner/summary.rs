@@ -58,6 +58,14 @@ pub struct SmartScanSummary {
     /// kept in wire format for backward-compat w/ the TS type. always false
     /// now that the mock path is gone
     pub mocked: bool,
+    /// raw bytes the walker accounted for (across user + system roots).
+    /// Disk screen renders accounted vs unaccounted vs free from this.
+    pub bytes_accounted: u64,
+    /// primary volume's used/total from sysinfo at scan start. paired
+    /// with bytes_accounted to render the reconciliation bar. zero when
+    /// the scan predates volume capture.
+    pub volume_used_bytes: u64,
+    pub volume_total_bytes: u64,
 }
 
 impl SmartScanSummary {
@@ -71,7 +79,7 @@ impl SmartScanSummary {
 }
 
 /// subset of [`crate::scanner::run::ScanProgress`] the dashboard cares about
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct LastScanFacts {
     /// bytes labelled Found or Safe by classify
     pub flagged_bytes: u64,
@@ -79,6 +87,12 @@ pub struct LastScanFacts {
     pub flagged_items: u64,
     /// unix seconds when the scan completed
     pub scanned_at: u64,
+    /// total bytes walked (every file the scanner touched, across user +
+    /// system roots). what the Disk screen calls "accounted".
+    pub bytes_accounted: u64,
+    /// primary volume's used/total bytes captured at scan start
+    pub volume_used_bytes: u64,
+    pub volume_total_bytes: u64,
 }
 
 /// process-wide holder for the most recent completed scan. written by
@@ -116,6 +130,9 @@ pub fn empty_summary() -> SmartScanSummary {
         scanned_at: None,
         categories: Vec::new(),
         mocked: false,
+        bytes_accounted: 0,
+        volume_used_bytes: 0,
+        volume_total_bytes: 0,
     }
 }
 
@@ -128,6 +145,9 @@ pub fn summary_from_scan(facts: LastScanFacts) -> SmartScanSummary {
         scanned_at: Some(facts.scanned_at),
         categories: Vec::new(),
         mocked: false,
+        bytes_accounted: facts.bytes_accounted,
+        volume_used_bytes: facts.volume_used_bytes,
+        volume_total_bytes: facts.volume_total_bytes,
     }
 }
 
@@ -151,12 +171,18 @@ mod tests {
             flagged_bytes: 7_600_000_000,
             flagged_items: 12_345,
             scanned_at: 1_700_000_000,
+            bytes_accounted: 20_000_000_000,
+            volume_used_bytes: 400_000_000_000,
+            volume_total_bytes: 1_000_000_000_000,
         };
         let s = summary_from_scan(facts);
         assert_eq!(s.total_bytes, 7_600_000_000);
         assert_eq!(s.total_items, 12_345);
         assert_eq!(s.scanned_at, Some(1_700_000_000));
         assert!(s.categories.is_empty());
+        assert_eq!(s.bytes_accounted, 20_000_000_000);
+        assert_eq!(s.volume_used_bytes, 400_000_000_000);
+        assert_eq!(s.volume_total_bytes, 1_000_000_000_000);
     }
 
     #[test]
@@ -167,6 +193,7 @@ mod tests {
             flagged_bytes: 1,
             flagged_items: 2,
             scanned_at: 3,
+            ..Default::default()
         };
         store.set(facts);
         let got = store.get().expect("set then get");
@@ -182,11 +209,13 @@ mod tests {
             flagged_bytes: 100,
             flagged_items: 1,
             scanned_at: 10,
+            ..Default::default()
         });
         store.set(LastScanFacts {
             flagged_bytes: 200,
             flagged_items: 2,
             scanned_at: 20,
+            ..Default::default()
         });
         let got = store.get().unwrap();
         assert_eq!(got.flagged_bytes, 200);
@@ -209,6 +238,9 @@ mod tests {
                 safe_note: "n",
             }],
             mocked: false,
+            bytes_accounted: 0,
+            volume_used_bytes: 0,
+            volume_total_bytes: 0,
         };
         s.recompute_totals();
         assert_eq!(s.total_bytes, 5);
@@ -230,11 +262,15 @@ mod tests {
             flagged_bytes: 10,
             flagged_items: 1,
             scanned_at: 42,
+            ..Default::default()
         });
         let v = serde_json::to_value(&s).unwrap();
         assert!(v.get("totalBytes").is_some());
         assert!(v.get("totalItems").is_some());
         assert!(v.get("scannedAt").is_some());
         assert!(v.get("mocked").is_some());
+        assert!(v.get("bytesAccounted").is_some());
+        assert!(v.get("volumeUsedBytes").is_some());
+        assert!(v.get("volumeTotalBytes").is_some());
     }
 }

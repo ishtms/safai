@@ -37,7 +37,7 @@ use crate::scanner::largeold::{
 };
 use crate::scanner::run::{
     next_handle_id, run_scan, Emit, ScanController, ScanEvent, ScanProgress, ScanRegistry,
-    ScanState,
+    ScanRoot, ScanState, VolumeSnapshot,
 };
 use crate::scanner::treemap::{
     self, next_treemap_handle_id, preflight_root, run_treemap_stream, TreemapCache,
@@ -99,6 +99,9 @@ impl Emit for AppEmitter {
             flagged_bytes: p.flagged_bytes,
             flagged_items: p.flagged_items,
             scanned_at: now_unix(),
+            bytes_accounted: p.bytes_scanned,
+            volume_used_bytes: p.volume_used_bytes,
+            volume_total_bytes: p.volume_total_bytes,
         });
         let _ = self.app.emit(EVENT_SCAN_DONE, p);
     }
@@ -113,40 +116,47 @@ pub struct ScanHandle {
     pub roots: Vec<String>,
 }
 
-/// None/empty roots = $HOME. returns immediately, walk runs on a
-/// dedicated thread.
+/// None/empty roots = $HOME plus per-OS system paths. returns
+/// immediately, walk runs on a dedicated thread.
 #[tauri::command]
 pub fn start_scan(
     app: AppHandle,
     registry: State<'_, ScanRegistry>,
     roots: Option<Vec<String>>,
 ) -> Result<ScanHandle, String> {
-    let roots: Vec<PathBuf> = roots
+    let scan_roots: Vec<ScanRoot> = roots
         .filter(|v| !v.is_empty())
-        .map(|v| v.into_iter().map(PathBuf::from).collect())
+        // explicit roots from the UI are always User - UI only lets you
+        // pick a folder you own
+        .map(|v| v.into_iter().map(|s| ScanRoot::user(PathBuf::from(s))).collect())
         .unwrap_or_else(default_roots);
 
-    if roots.is_empty() {
+    if scan_roots.is_empty() {
         return Err("no scan roots resolved".into());
     }
 
     let id = next_handle_id();
     let ctrl = Arc::new(ScanController::new());
+
+    // capture the primary volume snapshot once so every progress/done
+    // emission carries the reconciliation numbers. sysinfo round-trip is
+    // single-digit ms, fine on the command thread.
+    let snap = capture_volume_snapshot(&scan_roots);
+    ctrl.set_volume_snapshot(snap);
+
     registry.insert(id.clone(), ctrl.clone());
 
-    // emit_done reaches for LastScanStore via managed state, no need
-    // to thread it through here
     let emitter = AppEmitter { app: app.clone() };
-    let roots_echo: Vec<String> = roots
+    let roots_echo: Vec<String> = scan_roots
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|r| r.path.to_string_lossy().into_owned())
         .collect();
 
     let id_thread = id.clone();
     std::thread::Builder::new()
         .name(format!("safai-scan-{id}"))
         .spawn(move || {
-            run_scan(id_thread, roots, ctrl, emitter);
+            run_scan(id_thread, scan_roots, ctrl, emitter);
         })
         .map_err(|e| format!("failed to spawn scan thread: {e}"))?;
 
@@ -154,6 +164,33 @@ pub fn start_scan(
         id,
         roots: roots_echo,
     })
+}
+
+/// find the volume that owns the first user root ($HOME on default
+/// scans). zeros when sysinfo returned empty (sandbox, test).
+fn capture_volume_snapshot(roots: &[ScanRoot]) -> VolumeSnapshot {
+    let volumes = volumes::list_volumes();
+    // first User root is $HOME on a default scan, or the UI-selected
+    // folder on a custom scan. either way it's the volume to reconcile
+    // against.
+    let anchor = roots
+        .iter()
+        .find(|r| matches!(r.kind, crate::scanner::run::RootKind::User))
+        .map(|r| r.path.as_path())
+        .unwrap_or_else(|| {
+            // all-System shouldn't happen from the UI but stay robust
+            roots
+                .first()
+                .map(|r| r.path.as_path())
+                .unwrap_or(std::path::Path::new("/"))
+        });
+    match volumes::volume_for_path(&volumes, anchor) {
+        Some(v) => VolumeSnapshot {
+            used_bytes: v.used_bytes,
+            total_bytes: v.total_bytes,
+        },
+        None => VolumeSnapshot::default(),
+    }
 }
 
 /// idempotent
@@ -1165,20 +1202,107 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// prefers $HOME, falls back to / or C:\ so start_scan always has
-/// something to walk even in a bare sandbox.
-fn default_roots() -> Vec<PathBuf> {
+/// $HOME as the User root, plus per-OS world-readable system paths as
+/// System roots. System paths are best-effort (any permission-denied
+/// subtree just gets silently skipped by jwalk), count toward
+/// bytes_scanned but are not classified.
+///
+/// intentional gaps:
+/// - /System, /private (mac) - SIP-protected and largely unreadable
+/// - /proc, /sys, /run, /dev (linux) - pseudo-fs, counted elsewhere
+/// - System Volume Information, Recycle Bin (windows) - ACL-locked
+/// the cross-device guard in walk_one also drops external drives and
+/// network mounts automatically.
+fn default_roots() -> Vec<ScanRoot> {
+    let mut out: Vec<ScanRoot> = Vec::new();
     if let Some(home) = home_dir() {
-        return vec![home];
+        out.push(ScanRoot::user(home));
     }
-    // last resort, slow but guaranteed present
-    #[cfg(windows)]
+
+    #[cfg(target_os = "macos")]
     {
-        return vec![PathBuf::from("C:\\")];
+        for p in ["/Applications", "/Library", "/usr/local", "/opt"] {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                out.push(ScanRoot::system(path));
+            }
+        }
     }
-    #[cfg(not(windows))]
+
+    #[cfg(target_os = "linux")]
     {
-        vec![PathBuf::from("/")]
+        for p in ["/usr", "/opt", "/var", "/srv"] {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                out.push(ScanRoot::system(path));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        for name in ["Program Files", "Program Files (x86)", "ProgramData", "Windows"] {
+            let path = PathBuf::from(&drive).join(name);
+            if path.exists() {
+                out.push(ScanRoot::system(path));
+            }
+        }
+    }
+
+    // last resort, so the walker always has something
+    if out.is_empty() {
+        #[cfg(windows)]
+        {
+            out.push(ScanRoot::user(PathBuf::from("C:\\")));
+        }
+        #[cfg(not(windows))]
+        {
+            out.push(ScanRoot::user(PathBuf::from("/")));
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod default_roots_tests {
+    use super::*;
+    use crate::scanner::run::RootKind;
+
+    #[test]
+    fn home_is_first_user_root() {
+        let roots = default_roots();
+        assert!(!roots.is_empty());
+        let first = &roots[0];
+        assert_eq!(first.kind, RootKind::User);
+    }
+
+    #[test]
+    fn os_specific_system_roots_are_marked_system() {
+        let roots = default_roots();
+        let system = roots
+            .iter()
+            .filter(|r| matches!(r.kind, RootKind::System))
+            .count();
+        // at least one system root should exist on any of the three
+        // supported OSes (they all have readable system dirs). host
+        // CI can run on linux, mac, or windows.
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        assert!(system > 0, "expected at least one system root");
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        let _ = system;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_default_roots_include_usr() {
+        let roots = default_roots();
+        let paths: Vec<_> = roots
+            .iter()
+            .map(|r| r.path.to_string_lossy().into_owned())
+            .collect();
+        assert!(paths.iter().any(|p| p == "/usr"), "got {paths:?}");
     }
 }
 

@@ -16,6 +16,11 @@ import {
 } from '../lib/treemap';
 import { listVolumes, pickPrimary, type Volume } from '../lib/volumes';
 import { formatBytes, formatCount, splitBytes } from '../lib/format';
+import {
+  fetchPermissionStatus,
+  openPermissionSettings,
+  type PermissionStatusEntry,
+} from '../lib/onboarding';
 
 // disk usage treemap.
 // streams treemap://progress every ~150ms, terminal treemap://done. ui swaps in
@@ -36,6 +41,9 @@ export default function Disk() {
 
   const [volumes] = createResource(listVolumes);
   const primary = () => (volumes() ? pickPrimary(volumes()!) : null);
+  // only used for the mac FDA CTA; non-mac returns an empty array or
+  // entries with status unknown and we hide the CTA anyway
+  const [permStatus] = createResource(fetchPermissionStatus);
 
   let currentHandle: string | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -107,18 +115,23 @@ export default function Disk() {
 
   const drillInto = async (tile: TreemapTile) => {
     if (!tile.isDir || tile.isOther) return;
+    // no drilling mid-scan. interrupts the walk + users lose progress
+    // when they come back. wait for it to finish
+    if (scanning()) return;
     setStack((s) => [...s, tile.path]);
     setResponse(null);
     await navigateTo(tile.path);
   };
 
   const popTo = async (idx: number) => {
+    if (scanning()) return;
     setStack((s) => s.slice(0, idx + 1));
     setResponse(null);
     await navigateTo(currentRoot());
   };
 
   const goHome = async () => {
+    if (scanning()) return;
     setStack([]);
     setResponse(null);
     await navigateTo(undefined);
@@ -182,6 +195,7 @@ export default function Disk() {
           primary={primary()}
           breadcrumb={stack()}
           scanning={scanning()}
+          permStatus={permStatus() ?? []}
           onHome={() => void goHome()}
           onPop={(idx) => void popTo(idx)}
         />
@@ -209,7 +223,9 @@ export default function Disk() {
             folders={resp()?.biggest ?? []}
             total={resp()?.totalBytes ?? 0}
             scanning={scanning() && !resp()}
+            disabled={scanning()}
             onFolderClick={(f) => {
+              if (scanning()) return;
               setStack((s) => [...s, f.path]);
               setResponse(null);
               void navigateTo(f.path);
@@ -228,83 +244,262 @@ function HeaderStrip(props: {
   primary: Volume | null;
   breadcrumb: string[];
   scanning: boolean;
+  permStatus: PermissionStatusEntry[];
   onHome: () => void;
   onPop: (idx: number) => void;
 }) {
   const split = () => splitBytes(props.response?.totalBytes ?? 0);
+  const atHome = () => props.breadcrumb.length === 0;
+  const scopeLabel = () => (atHome() ? 'Home folder' : 'This folder');
+
+  // reconciliation math. accounted = current subtree bytes (or home on
+  // top-level), unaccounted = volume.used - accounted, floored at 0 so
+  // drilling into a subfolder doesn't show a negative band
+  const accounted = () => props.response?.totalBytes ?? 0;
+  const totalBytes = () => props.primary?.totalBytes ?? 0;
+  const usedBytes = () => props.primary?.usedBytes ?? 0;
+  const freeBytes = () => props.primary?.freeBytes ?? 0;
+  const unaccounted = () =>
+    atHome() ? Math.max(0, usedBytes() - accounted()) : Math.max(0, usedBytes() - accounted());
+
+  // mac FDA: show CTA when permission is explicitly denied AND
+  // unaccounted is meaningful (>5% of volume). non-mac permStatus has
+  // no entry for this kind so the find() returns undefined.
+  const fdaDenied = () =>
+    props.permStatus.find((p) => p.kind === 'mac-full-disk-access')?.status === 'denied';
+  const showFdaCta = () =>
+    atHome() &&
+    fdaDenied() &&
+    totalBytes() > 0 &&
+    unaccounted() / totalBytes() > 0.05;
+
   return (
     <div
       class="safai-card safai-sheen"
       style={{
         padding: '20px 24px',
         display: 'flex',
-        'align-items': 'center',
-        gap: '20px',
+        'flex-direction': 'column',
+        gap: '14px',
         background: 'linear-gradient(135deg, oklch(0.22 0.02 240), oklch(0.20 0.02 260))',
         border: '1px solid oklch(0.82 0.14 200 / 0.25)',
       }}
     >
-      <Suds size={64} mood={props.scanning ? 'happy' : 'happy'} float={props.scanning} />
-      <div style={{ flex: 1, 'min-width': 0 }}>
-        <Breadcrumb
-          root={props.response?.root ?? null}
-          stack={props.breadcrumb}
-          onHome={props.onHome}
-          onPop={props.onPop}
+      <div style={{ display: 'flex', 'align-items': 'center', gap: '20px' }}>
+        <Suds size={64} mood="happy" float={props.scanning} />
+        <div style={{ flex: 1, 'min-width': 0 }}>
+          <Breadcrumb
+            root={props.response?.root ?? null}
+            stack={props.breadcrumb}
+            onHome={props.onHome}
+            onPop={props.onPop}
+          />
+          <div
+            style={{
+              display: 'flex',
+              'align-items': 'baseline',
+              gap: '10px',
+              'margin-top': '6px',
+            }}
+          >
+            <div
+              class="num"
+              style={{
+                'font-size': '36px',
+                'font-weight': 600,
+                'font-family': 'var(--safai-font-display)',
+                'letter-spacing': '-0.04em',
+                'line-height': 1,
+                color: 'var(--safai-cyan)',
+                'font-variant-numeric': 'tabular-nums',
+              }}
+            >
+              {split().value}
+            </div>
+            <div style={{ 'font-size': '16px', color: 'var(--safai-fg-1)', 'font-weight': 500 }}>
+              {split().unit}
+            </div>
+            <div style={{ 'font-size': '12px', color: 'var(--safai-fg-3)' }}>
+              in {scopeLabel().toLowerCase()} · {formatCount(props.response?.totalFiles ?? 0)} files
+            </div>
+            <Show when={props.scanning}>
+              <ScanningPill />
+            </Show>
+          </div>
+        </div>
+        <Show when={props.primary}>
+          {(vol) => (
+            <div style={{ 'text-align': 'right', 'min-width': '120px' }}>
+              <div
+                style={{
+                  'font-size': '10px',
+                  color: 'var(--safai-fg-3)',
+                  'letter-spacing': '0.12em',
+                  'text-transform': 'uppercase',
+                  'margin-bottom': '4px',
+                }}
+              >
+                {vol().name} · whole disk
+              </div>
+              <div class="num" style={{ 'font-size': '14px', color: 'var(--safai-fg-0)' }}>
+                {formatBytes(vol().usedBytes)} used
+              </div>
+              <div
+                class="num"
+                style={{ 'font-size': '11px', color: 'var(--safai-fg-2)', 'margin-top': '2px' }}
+              >
+                {formatBytes(vol().freeBytes)} free of {formatBytes(vol().totalBytes)}
+              </div>
+            </div>
+          )}
+        </Show>
+      </div>
+
+      <Show when={atHome() && totalBytes() > 0}>
+        <ReconciliationBar
+          accounted={accounted()}
+          unaccounted={unaccounted()}
+          free={freeBytes()}
+          total={totalBytes()}
+        />
+      </Show>
+
+      <Show when={showFdaCta()}>
+        <FdaCta />
+      </Show>
+    </div>
+  );
+}
+
+// three-band stacked bar: what we scanned, what the OS has that we
+// can't read (system / other users / snapshots), and free space
+function ReconciliationBar(props: {
+  accounted: number;
+  unaccounted: number;
+  free: number;
+  total: number;
+}) {
+  const pct = (v: number) =>
+    props.total > 0 ? `${Math.max(0, Math.min(100, (v / props.total) * 100)).toFixed(2)}%` : '0%';
+  const systemTip = protectedTooltip();
+  return (
+    <div style={{ display: 'flex', 'flex-direction': 'column', gap: '6px' }}>
+      <div
+        style={{
+          height: '8px',
+          display: 'flex',
+          'border-radius': '999px',
+          overflow: 'hidden',
+          background: 'var(--safai-bg-2)',
+          border: '1px solid var(--safai-line)',
+        }}
+      >
+        <div
+          style={{ width: pct(props.accounted), background: 'var(--safai-cyan)' }}
+          title={`Scanned by safai: ${formatBytes(props.accounted)}`}
         />
         <div
           style={{
-            display: 'flex',
-            'align-items': 'baseline',
-            gap: '10px',
-            'margin-top': '6px',
+            width: pct(props.unaccounted),
+            background: 'oklch(0.58 0.10 60)',
           }}
-        >
-          <div
-            class="num"
-            style={{
-              'font-size': '36px',
-              'font-weight': 600,
-              'font-family': 'var(--safai-font-display)',
-              'letter-spacing': '-0.04em',
-              'line-height': 1,
-              color: 'var(--safai-cyan)',
-              'font-variant-numeric': 'tabular-nums',
-            }}
-          >
-            {split().value}
-          </div>
-          <div style={{ 'font-size': '16px', color: 'var(--safai-fg-1)', 'font-weight': 500 }}>
-            {split().unit}
-          </div>
-          <div style={{ 'font-size': '12px', color: 'var(--safai-fg-3)' }}>
-            across {formatCount(props.response?.totalFiles ?? 0)} files
-          </div>
-          <Show when={props.scanning}>
-            <ScanningPill />
-          </Show>
-        </div>
+          title={`System & protected: ${formatBytes(props.unaccounted)} — ${systemTip}`}
+        />
+        <div
+          style={{
+            width: pct(props.free),
+            background: 'oklch(0.35 0.02 240)',
+          }}
+          title={`Free: ${formatBytes(props.free)}`}
+        />
       </div>
-      <Show when={props.primary}>
-        {(vol) => (
-          <div style={{ 'text-align': 'right' }}>
-            <div
-              style={{
-                'font-size': '10px',
-                color: 'var(--safai-fg-3)',
-                'letter-spacing': '0.12em',
-                'text-transform': 'uppercase',
-                'margin-bottom': '4px',
-              }}
-            >
-              {vol().name}
-            </div>
-            <div class="num" style={{ 'font-size': '14px', color: 'var(--safai-fg-1)' }}>
-              {formatBytes(vol().freeBytes)} free
-            </div>
-          </div>
-        )}
-      </Show>
+      <div
+        style={{
+          display: 'flex',
+          gap: '16px',
+          'font-size': '10px',
+          color: 'var(--safai-fg-3)',
+          'letter-spacing': '0.02em',
+          'flex-wrap': 'wrap',
+        }}
+      >
+        <LegendDot color="var(--safai-cyan)" label={`Scanned ${formatBytes(props.accounted)}`} />
+        <LegendDot
+          color="oklch(0.58 0.10 60)"
+          label={`System & protected ${formatBytes(props.unaccounted)}`}
+          title={systemTip}
+        />
+        <LegendDot color="oklch(0.35 0.02 240)" label={`Free ${formatBytes(props.free)}`} />
+      </div>
+    </div>
+  );
+}
+
+function LegendDot(props: { color: string; label: string; title?: string }) {
+  return (
+    <span
+      title={props.title}
+      style={{ display: 'inline-flex', 'align-items': 'center', gap: '6px' }}
+    >
+      <span
+        style={{
+          width: '8px',
+          height: '8px',
+          'border-radius': '2px',
+          background: props.color,
+        }}
+      />
+      <span>{props.label}</span>
+    </span>
+  );
+}
+
+// best-effort per-OS copy. detection via userAgent since we don't want
+// to pay for a tauri round-trip here - it's purely informational
+function protectedTooltip(): string {
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  if (/Mac|Darwin/i.test(ua)) {
+    return 'macOS system files, other users, APFS snapshots';
+  }
+  if (/Win/i.test(ua)) {
+    return 'Windows system files, other users, System Volume Information';
+  }
+  return 'system files owned by root, other users';
+}
+
+function FdaCta() {
+  const onClick = async () => {
+    try {
+      await openPermissionSettings('mac-full-disk-access');
+    } catch {
+      // user can still navigate System Settings manually
+    }
+  };
+  return (
+    <div
+      style={{
+        display: 'flex',
+        'align-items': 'center',
+        gap: '10px',
+        padding: '8px 12px',
+        'border-radius': '6px',
+        background: 'oklch(0.82 0.14 60 / 0.12)',
+        border: '1px solid oklch(0.82 0.14 60 / 0.35)',
+        'font-size': '11px',
+        color: 'var(--safai-fg-1)',
+      }}
+    >
+      <Icon name="refresh" size={12} />
+      <span style={{ flex: 1 }}>
+        Grant Full Disk Access to shrink the "System & protected" band.
+      </span>
+      <button
+        class="safai-btn safai-btn--ghost"
+        style={{ padding: '2px 10px', 'font-size': '11px' }}
+        onClick={() => void onClick()}
+      >
+        Open Settings
+      </button>
     </div>
   );
 }
@@ -475,6 +670,7 @@ function TreemapCanvas(props: {
             {(tile) => (
               <TreemapRect
                 tile={tile}
+                disabled={props.scanning}
                 onClick={() => props.onTileClick(tile)}
                 onHover={(t) => setHover(t)}
               />
@@ -491,24 +687,32 @@ function TreemapCanvas(props: {
 
 function TreemapRect(props: {
   tile: TreemapTile;
+  disabled?: boolean;
   onClick: () => void;
   onHover: (t: TreemapTile | null) => void;
 }) {
   const { tile } = props;
   const color = () => (tile.isOther ? 'oklch(0.35 0.02 240)' : tileColor(tile.name));
   const pct = (v: number) => `${(v * 100).toFixed(3)}%`;
+  const clickable = () => tile.isDir && !tile.isOther && !props.disabled;
 
   return (
     <div
-      role={tile.isDir && !tile.isOther ? 'button' : 'img'}
-      tabindex={tile.isDir && !tile.isOther ? 0 : -1}
-      onClick={props.onClick}
+      role={clickable() ? 'button' : 'img'}
+      tabindex={clickable() ? 0 : -1}
+      aria-disabled={props.disabled ? 'true' : undefined}
+      onClick={() => clickable() && props.onClick()}
       onMouseEnter={() => props.onHover(tile)}
       onMouseLeave={() => props.onHover(null)}
       onKeyDown={(e) => {
+        if (!clickable()) return;
         if (e.key === 'Enter' || e.key === ' ') props.onClick();
       }}
-      title={`${tile.name} — ${formatBytes(tile.bytes)} (${formatCount(tile.fileCount)} files)`}
+      title={
+        props.disabled
+          ? 'Wait for the scan to finish before drilling in'
+          : `${tile.name} — ${formatBytes(tile.bytes)} (${formatCount(tile.fileCount)} files)`
+      }
       style={{
         position: 'absolute',
         left: pct(tile.rect.x),
@@ -518,7 +722,7 @@ function TreemapRect(props: {
         background: color(),
         opacity: tile.isOther ? 0.55 : 0.92,
         border: '1px solid oklch(0.14 0.02 240 / 0.6)',
-        cursor: tile.isDir && !tile.isOther ? 'pointer' : 'default',
+        cursor: clickable() ? 'pointer' : 'default',
         overflow: 'hidden',
         display: 'flex',
         'flex-direction': 'column',
@@ -619,6 +823,7 @@ function BiggestFoldersPanel(props: {
   folders: BiggestFolder[];
   total: number;
   scanning: boolean;
+  disabled?: boolean;
   onFolderClick: (f: BiggestFolder) => void;
 }) {
   return (
@@ -655,7 +860,12 @@ function BiggestFoldersPanel(props: {
       >
         <For each={props.folders}>
           {(f) => (
-            <BiggestFolderRow f={f} total={props.total} onClick={() => props.onFolderClick(f)} />
+            <BiggestFolderRow
+              f={f}
+              total={props.total}
+              disabled={props.disabled ?? false}
+              onClick={() => props.onFolderClick(f)}
+            />
           )}
         </For>
       </Show>
@@ -666,18 +876,22 @@ function BiggestFoldersPanel(props: {
 function BiggestFolderRow(props: {
   f: BiggestFolder;
   total: number;
+  disabled: boolean;
   onClick: () => void;
 }) {
   const pct = () => (props.total > 0 ? (props.f.bytes / props.total) * 100 : 0);
   return (
     <button
       class="safai-card safai-card--hover"
+      disabled={props.disabled}
+      title={props.disabled ? 'Wait for the scan to finish' : props.f.path}
       style={{
         padding: '10px 12px',
-        cursor: 'pointer',
+        cursor: props.disabled ? 'default' : 'pointer',
         background: 'var(--safai-bg-2)',
         border: '1px solid var(--safai-line)',
         'text-align': 'left',
+        opacity: props.disabled ? 0.6 : 1,
       }}
       onClick={props.onClick}
     >

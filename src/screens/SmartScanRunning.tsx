@@ -26,7 +26,7 @@ import {
   type ScanState,
 } from '../lib/scanner';
 import { junkScan } from '../lib/junk';
-import { formatBytes, formatCount, formatDuration, splitBytes } from '../lib/format';
+import { formatBytes, formatCount, formatDuration, splitBytes, truncateMiddle } from '../lib/format';
 
 // which scan we're fronting. ?kind= so Smart Scan's Rescan + System Junk's
 // Rescan share the visual but hit different backends.
@@ -151,6 +151,8 @@ export default function SmartScanRunning(): JSX.Element {
         elapsedMs: performance.now() - startedAt,
         state: 'done',
         currentPath: null,
+        volumeUsedBytes: 0,
+        volumeTotalBytes: 0,
       });
       window.setTimeout(() => {
         if (disposed) return;
@@ -315,6 +317,8 @@ function emptyProgress(): ScanProgress {
     elapsedMs: 0,
     state: 'running',
     currentPath: null,
+    volumeUsedBytes: 0,
+    volumeTotalBytes: 0,
   };
 }
 
@@ -362,7 +366,7 @@ function HeroText(props: { currentPath: string; state: ScanState; isPaused: bool
         }}
         title={props.currentPath}
       >
-        {props.currentPath || '—'}
+        {truncateMiddle(props.currentPath || '—', 90)}
       </div>
     </div>
   );
@@ -571,7 +575,12 @@ function LogRow(props: { entry: ScanEvent; fade: number }) {
     const s = total % 60;
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
+  const shortPath = () => truncateMiddle(props.entry.path, 70);
   const tail = () =>
+    props.entry.kind === 'scan'
+      ? shortPath()
+      : `${formatBytes(props.entry.bytes)} · ${shortPath()}`;
+  const fullTail = () =>
     props.entry.kind === 'scan'
       ? props.entry.path
       : `${formatBytes(props.entry.bytes)} · ${props.entry.path}`;
@@ -581,9 +590,10 @@ function LogRow(props: { entry: ScanEvent; fade: number }) {
         display: 'flex',
         gap: '12px',
         opacity: 1 - props.fade * 0.5,
+        'min-width': 0,
       }}
     >
-      <span style={{ color: 'var(--safai-fg-3)' }}>{ts()}</span>
+      <span style={{ color: 'var(--safai-fg-3)', 'flex-shrink': 0 }}>{ts()}</span>
       <span
         style={{
           width: '52px',
@@ -601,11 +611,12 @@ function LogRow(props: { entry: ScanEvent; fade: number }) {
         style={{
           color: props.entry.kind === 'scan' ? 'var(--safai-fg-2)' : 'var(--safai-fg-0)',
           flex: 1,
+          'min-width': 0,
           'white-space': 'nowrap',
           overflow: 'hidden',
           'text-overflow': 'ellipsis',
         }}
-        title={tail()}
+        title={fullTail()}
       >
         {tail()}
       </span>
