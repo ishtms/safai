@@ -199,12 +199,7 @@ export default function Settings(): JSX.Element {
                   />
                 </Match>
                 <Match when={tab() === 'privacy'}>
-                  <PrivacyTab
-                    draft={d()}
-                    setTelemetry={(v) =>
-                      setDraft((cur) => (cur ? { ...cur, telemetryOptIn: v } : cur))
-                    }
-                  />
+                  <PrivacyTab draft={d()} />
                 </Match>
                 <Match when={tab() === 'about'}>
                   <AboutTab draft={d()} />
@@ -414,20 +409,9 @@ function ScanningTab(props: {
 
 // privacy tab
 
-function PrivacyTab(props: { draft: SettingsBundle; setTelemetry: (v: boolean) => void }) {
+function PrivacyTab(_props: { draft: SettingsBundle }) {
   return (
     <div style={{ display: 'flex', 'flex-direction': 'column', gap: '18px' }}>
-      <SectionCard
-        title="Telemetry"
-        subtitle="Off by default. Nothing is sent without an explicit opt-in."
-        body={
-          <CheckboxRow
-            label="Send anonymous crash reports (you can switch this off any time)"
-            checked={props.draft.telemetryOptIn}
-            onChange={() => props.setTelemetry(!props.draft.telemetryOptIn)}
-          />
-        }
-      />
       <SectionCard
         title="Re-run onboarding"
         subtitle="Clears onboarding state; next launch walks you through welcome → permissions → prefs → ready again."

@@ -25,7 +25,6 @@ import {
   recordPermission,
   saveOnboardingPrefs,
   setOnboardingStep,
-  setTelemetryOptIn,
   stepIndex,
   type IncludedCategory,
   type OnboardingState,
@@ -206,7 +205,7 @@ function WelcomeStep(props: { onNext: () => void }) {
     <StepShell
       step="welcome"
       title="Hi, I'm Suds"
-      subtitle="I clean up the fluff on your computer so it feels fast again. No ads, no spyware — it's just us."
+      subtitle="I clean up the fluff on your computer so it feels fast again. No ads, no spyware - it's just us."
       mood="happy"
       onBack={null}
       primaryLabel="Let's go"
@@ -225,7 +224,7 @@ function WelcomeStep(props: { onNext: () => void }) {
         <Bullet
           icon="broom"
           title="I find the junk"
-          body="Caches, logs, old package manager bits — things your apps will happily regenerate."
+          body="Caches, logs, old package manager bits - things your apps will happily regenerate."
         />
         <Bullet
           icon="shield"
@@ -397,7 +396,7 @@ function PermissionsStep(props: { state: OnboardingState; onNext: () => void; on
               <span>
                 Safai can't scan what it can't read. Every item above needs
                 to be granted before I can continue. If you'd rather not
-                grant access, close the app — there's nothing useful I can
+                grant access, close the app - there's nothing useful I can
                 do without it.
               </span>
             </div>
@@ -505,7 +504,6 @@ function PrefsStep(props: {
   onMutate: (s: OnboardingState) => void;
 }) {
   const [prefs, setPrefs] = createSignal<Preferences>(props.state.prefs ?? defaultPreferences());
-  const [telemetry, setTelemetry] = createSignal(props.state.telemetryOptIn);
 
   const toggleCat = (c: IncludedCategory) => {
     setPrefs((p) => {
@@ -521,13 +519,7 @@ function PrefsStep(props: {
 
   const save = async () => {
     const merged = await saveOnboardingPrefs(prefs());
-    // telemetry is outside Preferences, separate command
-    if (telemetry() !== merged.telemetryOptIn) {
-      const s2 = await setTelemetryOptIn(telemetry());
-      props.onMutate(s2);
-    } else {
-      props.onMutate(merged);
-    }
+    props.onMutate(merged);
     props.onNext();
   };
 
@@ -535,7 +527,7 @@ function PrefsStep(props: {
     <StepShell
       step="prefs"
       title="How do you want me to run?"
-      subtitle="Pick the knobs you care about — every one of these can be changed later from Settings."
+      subtitle="Pick the knobs you care about - every one of these can be changed later from Settings."
       mood="happy"
       onBack={props.onBack}
       primaryLabel="Save and continue"
@@ -595,11 +587,6 @@ function PrefsStep(props: {
               onChange={() =>
                 setPrefs((p) => ({ ...p, confirmBeforeClean: !p.confirmBeforeClean }))
               }
-            />
-            <CheckboxRow
-              label="Send anonymous crash reports (off by default)"
-              checked={telemetry()}
-              onChange={() => setTelemetry((v) => !v)}
             />
           </div>
         </section>
