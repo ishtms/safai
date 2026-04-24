@@ -8,6 +8,7 @@ pub mod dupes;
 pub mod junk;
 pub mod largeold;
 pub mod malware;
+pub mod meta_ext;
 pub mod privacy;
 pub mod run;
 pub mod startup;

@@ -353,7 +353,7 @@ fn stat_target(abs: &Path, profile: &str) -> Option<PrivacyTarget> {
     if meta.is_file() {
         return Some(PrivacyTarget {
             path: abs.to_string_lossy().into_owned(),
-            bytes: meta.len(),
+            bytes: super::super::meta_ext::allocated_bytes(&meta),
             file_count: 1,
             last_modified: meta_mtime(&meta),
             profile: profile.to_string(),
@@ -392,7 +392,7 @@ fn sum_subtree(dir: &Path) -> (u64, u64, Option<u64>) {
         if !meta.is_file() {
             continue;
         }
-        bytes = bytes.saturating_add(meta.len());
+        bytes = bytes.saturating_add(super::super::meta_ext::allocated_bytes(&meta));
         files += 1;
         if let Some(mt) = meta_mtime(&meta) {
             newest = Some(newest.map_or(mt, |n| n.max(mt)));

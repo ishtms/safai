@@ -24,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use super::catalog::{catalog_for, platform_tag, JunkCategoryId, JunkCategorySpec, Os};
+use super::super::meta_ext::allocated_bytes;
 
 /// cap on detail rows per category. totals still count everything,
 /// nobody scrolls past 100 cache subdirs.
@@ -206,7 +207,7 @@ fn sum_subtree(dir: &Path) -> (u64, u64, Option<u64>) {
         if !meta.is_file() {
             continue;
         }
-        bytes = bytes.saturating_add(meta.len());
+        bytes = bytes.saturating_add(allocated_bytes(&meta));
         files += 1;
         if let Some(mt) = meta_mtime(&meta) {
             newest = Some(newest.map_or(mt, |n| n.max(mt)));
@@ -221,7 +222,7 @@ fn detail_for_file(path: &Path, meta: &fs::Metadata) -> Option<JunkPathDetail> {
     }
     Some(JunkPathDetail {
         path: path.to_string_lossy().into_owned(),
-        bytes: meta.len(),
+        bytes: allocated_bytes(meta),
         file_count: 1,
         last_modified: meta_mtime(meta),
     })

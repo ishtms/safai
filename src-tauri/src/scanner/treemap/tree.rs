@@ -203,7 +203,7 @@ pub fn build_tree(root: &Path, max_depth: usize) -> Result<TreeNode, TreeBuildEr
         return Ok(TreeNode {
             name: root_name,
             path: root.to_string_lossy().into_owned(),
-            bytes: meta.len(),
+            bytes: super::super::meta_ext::allocated_bytes(&meta),
             file_count: 1,
             is_dir: false,
             children: Vec::new(),
@@ -235,7 +235,10 @@ pub fn build_tree(root: &Path, max_depth: usize) -> Result<TreeNode, TreeBuildEr
         if !ft.is_file() {
             continue;
         }
-        let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let bytes = entry
+            .metadata()
+            .map(|m| super::super::meta_ext::allocated_bytes(&m))
+            .unwrap_or(0);
 
         let rel = match path.strip_prefix(root) {
             Ok(r) => r,

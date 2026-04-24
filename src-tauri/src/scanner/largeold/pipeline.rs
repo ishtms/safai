@@ -213,7 +213,16 @@ pub fn find_large_old(
             Ok(m) => m,
             Err(_) => continue,
         };
-        let size = meta.len();
+        let path = entry.path();
+        // skip well-known sparse container files (Docker.raw, Parallels,
+        // iOS sim etc). their logical size is inflated vs what actually
+        // touches the disk, and surfacing them wastes a row since the
+        // user can't clean them standalone without breaking the owning
+        // app.
+        if super::super::meta_ext::is_sparse_container_path(&path) {
+            continue;
+        }
+        let size = super::super::meta_ext::allocated_bytes(&meta);
         if size < min_bytes {
             continue;
         }
@@ -232,7 +241,6 @@ pub fn find_large_old(
         if idle_secs < min_idle_secs {
             continue;
         }
-        let path = entry.path();
         let extension = path
             .extension()
             .and_then(|o| o.to_str())

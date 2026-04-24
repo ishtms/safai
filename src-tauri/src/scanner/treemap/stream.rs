@@ -120,7 +120,7 @@ pub fn run_treemap_stream<E: TreemapEmit>(
         if meta.is_file() {
             let resp = TreemapResponse {
                 root: root.to_string_lossy().into_owned(),
-                total_bytes: meta.len(),
+                total_bytes: super::super::meta_ext::allocated_bytes(&meta),
                 total_files: 1,
                 tiles: Vec::new(),
                 biggest: Vec::new(),
@@ -153,7 +153,10 @@ pub fn run_treemap_stream<E: TreemapEmit>(
         if ft.is_symlink() || !ft.is_file() {
             continue;
         }
-        let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let bytes = entry
+            .metadata()
+            .map(|m| super::super::meta_ext::allocated_bytes(&m))
+            .unwrap_or(0);
         let rel = match path.strip_prefix(&root) {
             Ok(r) => r.to_path_buf(),
             Err(_) => continue,

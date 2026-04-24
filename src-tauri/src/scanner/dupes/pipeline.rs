@@ -324,11 +324,16 @@ fn collect_candidates(
             continue;
         }
         let path = entry.path();
+        // sparse container files (Docker.raw etc) would otherwise look
+        // like dupes by logical size. skip them.
+        if super::super::meta_ext::is_sparse_container_path(&path) {
+            continue;
+        }
         let meta = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
-        let size = meta.len();
+        let size = super::super::meta_ext::allocated_bytes(&meta);
         if size < min_bytes {
             continue;
         }
