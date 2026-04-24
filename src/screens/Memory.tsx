@@ -11,19 +11,18 @@ import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
 import { formatBytes, splitBytes } from '../lib/format';
 import {
-  activitySample,
-  cancelActivity,
-  forgetActivity,
   pressureColour,
   pressureTone,
-  startActivity,
-  startMockTicker,
-  subscribeActivity,
   type ActivitySnapshot,
   type MemorySnapshot,
   type ProcessRow,
 } from '../lib/activity';
-import { isTauri } from '../lib/ipc';
+import {
+  acquireActivityStream,
+  latestSnapshot,
+  releaseActivityStream,
+  snapshotHistory,
+} from '../lib/activityStream';
 
 // memory screen. pressure ring + used/free/swap hero, top hogs in sidebar,
 // 60-tick rolling sparkline of used memory. all driven off one
@@ -32,55 +31,17 @@ import { isTauri } from '../lib/ipc';
 const SPARK_HISTORY = 60;
 
 export default function Memory(): JSX.Element {
-  const [snap, setSnap] = createSignal<ActivitySnapshot | null>(null);
-  const [history, setHistory] = createSignal<ActivitySnapshot[]>([]);
-  const [error, setError] = createSignal<string | null>(null);
-  const [handleId, setHandleId] = createSignal<string | null>(null);
+  const snap = latestSnapshot();
+  const history = snapshotHistory();
+  const [error] = createSignal<string | null>(null);
 
-  let unlisten: (() => void) | null = null;
-  let stopMock: (() => void) | null = null;
-
-  onMount(async () => {
-    if (isTauri()) {
-      try {
-        const first = await activitySample();
-        pushSnap(first);
-      } catch (e) {
-        // non-fatal, subscription below recovers
-        // eslint-disable-next-line no-console
-        console.warn('activity_sample failed', e);
-      }
-      try {
-        unlisten = await subscribeActivity({ onSnapshot: pushSnap });
-        const h = await startActivity({});
-        setHandleId(h.id);
-      } catch (e) {
-        setError(String(e));
-      }
-    } else {
-      // browser fallback so pnpm dev shows something without the rust host
-      stopMock = startMockTicker(pushSnap);
-    }
+  onMount(() => {
+    acquireActivityStream();
   });
 
   onCleanup(() => {
-    if (stopMock) stopMock();
-    if (unlisten) unlisten();
-    const id = handleId();
-    if (id) {
-      // fire-and-forget, window's going away
-      cancelActivity(id).catch(() => {});
-      forgetActivity(id).catch(() => {});
-    }
+    releaseActivityStream();
   });
-
-  function pushSnap(s: ActivitySnapshot) {
-    setSnap(s);
-    setHistory((prev) => {
-      const next = prev.concat(s);
-      return next.length > SPARK_HISTORY ? next.slice(next.length - SPARK_HISTORY) : next;
-    });
-  }
 
   const mem = createMemo(() => snap()?.memory);
   const pressure = createMemo(() => mem()?.pressurePercent ?? 0);

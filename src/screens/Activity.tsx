@@ -12,29 +12,27 @@ import { Suds } from '../components/Suds';
 import { Icon } from '../components/Icon';
 import { formatBytes, formatCount } from '../lib/format';
 import {
-  activitySample,
-  cancelActivity,
   filterProcesses,
-  forgetActivity,
   killProcess,
   sortProcesses,
-  startActivity,
-  startMockTicker,
-  subscribeActivity,
-  type ActivitySnapshot,
   type ProcessRow,
   type SortDirection,
   type SortKey,
 } from '../lib/activity';
-import { isTauri } from '../lib/ipc';
+import {
+  acquireActivityStream,
+  latestSnapshot,
+  releaseActivityStream,
+} from '../lib/activityStream';
 
 // activity monitor. sortable table off the activity://snapshot stream.
 // filter is client-side on the latest snapshot. kill is SIGTERM, alt-click = SIGKILL.
 
 export default function Activity(): JSX.Element {
-  const [snap, setSnap] = createSignal<ActivitySnapshot | null>(null);
-  const [handleId, setHandleId] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  // shared stream across Memory + Activity + remounts. no handle juggling
+  // here, the singleton owns it
+  const snap = latestSnapshot();
+  const [error] = createSignal<string | null>(null);
   const [query, setQuery] = createSignal('');
   const [sortKey, setSortKey] = createSignal<SortKey>('cpu');
   const [sortDir, setSortDir] = createSignal<SortDirection>('desc');
@@ -44,39 +42,12 @@ export default function Activity(): JSX.Element {
     { tone: 'ok' | 'error'; text: string } | null
   >(null);
 
-  let unlisten: (() => void) | null = null;
-  let stopMock: (() => void) | null = null;
-
-  onMount(async () => {
-    if (isTauri()) {
-      try {
-        const first = await activitySample(25);
-        setSnap(first);
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn('activity_sample failed', e);
-      }
-      try {
-        unlisten = await subscribeActivity({ onSnapshot: setSnap });
-        // 2s tick. faster feels twitchy since sort reshuffles every update
-        const h = await startActivity({ topN: 25, intervalMs: 2000 });
-        setHandleId(h.id);
-      } catch (e) {
-        setError(String(e));
-      }
-    } else {
-      stopMock = startMockTicker((s) => setSnap(s));
-    }
+  onMount(() => {
+    acquireActivityStream();
   });
 
   onCleanup(() => {
-    if (stopMock) stopMock();
-    if (unlisten) unlisten();
-    const id = handleId();
-    if (id) {
-      cancelActivity(id).catch(() => {});
-      forgetActivity(id).catch(() => {});
-    }
+    releaseActivityStream();
   });
 
   const sortedRows = createMemo<ProcessRow[]>(() => {
