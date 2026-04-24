@@ -6,6 +6,7 @@ import {
   onCleanup,
   Show,
 } from 'solid-js';
+import { invalidate, KEY_LARGE_OLD, peekCached, setCached } from '../lib/scanCache';
 import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
 import { Icon } from '../components/Icon';
@@ -50,7 +51,16 @@ type SortField = 'bytes' | 'idleDays' | 'path' | 'extension';
 type SortDir = 'asc' | 'desc';
 
 export default function LargeOld() {
-  const [response, setResponse] = createSignal<LargeOldReport | null>(null);
+  // seed from cache so tab-switching doesn't re-kick the walk. first
+  // visit returns undefined and we start a scan; later visits hydrate
+  // instantly from the last completed report
+  const cachedInitial = peekCached<LargeOldReport>(KEY_LARGE_OLD) ?? null;
+  const [response, setResponseRaw] = createSignal<LargeOldReport | null>(cachedInitial);
+  // wrap setResponse so the module cache stays in sync with on-screen state
+  const setResponse = (next: LargeOldReport | null) => {
+    setResponseRaw(next);
+    if (next) setCached(KEY_LARGE_OLD, next);
+  };
   const [scanning, setScanning] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [selected, setSelected] = createSignal<Set<string>>(new Set());
@@ -83,7 +93,8 @@ export default function LargeOld() {
     await stopWalk();
     setError(null);
     setScanning(true);
-    setResponse(null);
+    invalidate(KEY_LARGE_OLD);
+    setResponseRaw(null);
     setSelected(new Set<string>());
     setVisibleRows(TABLE_PAGE_STEP);
     try {
@@ -102,7 +113,10 @@ export default function LargeOld() {
     }
   };
 
-  void startWalk();
+  // only walk on first visit. later mounts render the cached report
+  if (!cachedInitial) {
+    void startWalk();
+  }
   onCleanup(() => {
     void stopWalk();
   });

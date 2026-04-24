@@ -18,6 +18,7 @@ import {
   type JunkPathDetail,
   type JunkReport,
 } from '../lib/junk';
+import { KEY_JUNK, sharedResource } from '../lib/scanCache';
 import {
   commitDelete,
   graveyardStats,
@@ -35,7 +36,9 @@ import type { SudsMood } from '../components/Suds';
 // system junk. category cards on the left expand to per-path rows w/ checkboxes,
 // detail pane on the right (suds + preview)
 export default function Junk() {
-  const [report, { refetch }] = createResource(junkScan);
+  // shared cache so tab-switching doesn't re-run the scan. rescan button
+  // still forces a fresh fetch via refetch()
+  const [report, { refetch }] = sharedResource(KEY_JUNK, junkScan);
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set(['user-caches']));
   const [focusedPath, setFocusedPath] = createSignal<{ cat: JunkCategoryReport; row: JunkPathDetail } | null>(null);
   const navigate = useNavigate();

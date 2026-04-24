@@ -21,6 +21,7 @@ import {
   type DuplicateGroup,
   type DuplicateReport,
 } from '../lib/duplicates';
+import { invalidate, KEY_DUPLICATES, peekCached, setCached } from '../lib/scanCache';
 import {
   commitDelete,
   graveyardStats,
@@ -48,7 +49,12 @@ const VISIBLE_GROUPS_STEP = 50;
 const FILES_PER_GROUP_PREVIEW = 8;
 
 export default function Duplicates() {
-  const [response, setResponse] = createSignal<DuplicateReport | null>(null);
+  const cachedInitial = peekCached<DuplicateReport>(KEY_DUPLICATES) ?? null;
+  const [response, setResponseRaw] = createSignal<DuplicateReport | null>(cachedInitial);
+  const setResponse = (next: DuplicateReport | null) => {
+    setResponseRaw(next);
+    if (next) setCached(KEY_DUPLICATES, next);
+  };
   const [scanning, setScanning] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -82,7 +88,8 @@ export default function Duplicates() {
     await stopWalk();
     setError(null);
     setScanning(true);
-    setResponse(null);
+    invalidate(KEY_DUPLICATES);
+    setResponseRaw(null);
     setDisabled(new Set<string>());
     setVisibleCount(VISIBLE_GROUPS_STEP);
     try {
@@ -101,7 +108,9 @@ export default function Duplicates() {
     }
   };
 
-  void startWalk();
+  if (!cachedInitial) {
+    void startWalk();
+  }
   onCleanup(() => {
     void stopWalk();
   });

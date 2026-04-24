@@ -1,7 +1,6 @@
 import {
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   For,
   onCleanup,
@@ -18,6 +17,7 @@ import {
   type PrivacyCategoryReport,
   type PrivacyReport,
 } from '../lib/privacy';
+import { KEY_PRIVACY, sharedResource } from '../lib/scanCache';
 import {
   commitDelete,
   previewDelete,
@@ -32,7 +32,7 @@ import { formatBytes, formatCount, formatRelativeTime } from '../lib/format';
 // chrome history but keeping firefox's works. cleans via the shared cleaner
 // (preview -> confirm -> commit), restore last same as Junk.
 export default function Privacy() {
-  const [report, { refetch }] = createResource(privacyScan);
+  const [report, { refetch }] = sharedResource(KEY_PRIVACY, privacyScan);
 
   // drives "last scanned Xs ago" + the feedback latch below. 250ms is
   // snappy enough for a visible release

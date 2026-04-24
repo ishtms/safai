@@ -1,7 +1,6 @@
 import {
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   For,
   onCleanup,
@@ -24,13 +23,14 @@ import {
   type StartupSource,
 } from '../lib/startup';
 import { formatCount, formatRelativeTime } from '../lib/format';
+import { KEY_STARTUP, sharedResource } from '../lib/scanCache';
 
 // startup items manager. login-time autostarts grouped by source w/ a
 // toggle each. hero shows before/after boot-time from per-item impact
 // tiers. flipping a switch live-previews "after" before the toggle
 // commits, so users can audit.
 export default function Startup() {
-  const [report, { refetch }] = createResource(startupScan);
+  const [report, { refetch }] = sharedResource(KEY_STARTUP, startupScan);
 
   const [clock, setClock] = createSignal(Date.now());
   const tick = setInterval(() => setClock(Date.now()), 500);
