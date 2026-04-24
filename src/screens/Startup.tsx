@@ -5,10 +5,10 @@ import {
   For,
   onCleanup,
   Show,
-} from 'solid-js';
-import { SafaiToolbar } from '../components/SafaiToolbar';
-import { Suds } from '../components/Suds';
-import { Icon, type IconName } from '../components/Icon';
+} from "solid-js";
+import { SafaiToolbar } from "../components/SafaiToolbar";
+import { Suds } from "../components/Suds";
+import { Icon, type IconName } from "../components/Icon";
 import {
   BOOT_SECONDS_PER_IMPACT,
   estimateBootSeconds,
@@ -21,9 +21,9 @@ import {
   type StartupItem,
   type StartupReport,
   type StartupSource,
-} from '../lib/startup';
-import { formatCount, formatRelativeTime } from '../lib/format';
-import { KEY_STARTUP, sharedResource } from '../lib/scanCache';
+} from "../lib/startup";
+import { formatCount, formatRelativeTime, truncateMiddle } from "../lib/format";
+import { KEY_STARTUP, sharedResource } from "../lib/scanCache";
 
 // startup items manager. login-time autostarts grouped by source w/ a
 // toggle each. hero shows before/after boot-time from per-item impact
@@ -38,14 +38,17 @@ export default function Startup() {
 
   // optimistic overrides, set on toggle + cleared when refetch reflects the
   // new state. lets "after" update instantly
-  const [overrides, setOverrides] = createSignal<Map<string, boolean>>(new Map());
+  const [overrides, setOverrides] = createSignal<Map<string, boolean>>(
+    new Map(),
+  );
 
   // in-flight per item so the switch disables during a toggle
   const [pendingIds, setPendingIds] = createSignal<Set<string>>(new Set());
 
-  const [status, setStatus] = createSignal<
-    { tone: 'ok' | 'error'; text: string } | null
-  >(null);
+  const [status, setStatus] = createSignal<{
+    tone: "ok" | "error";
+    text: string;
+  } | null>(null);
 
   // clear overrides on fresh scan
   let lastStamp: number | null = null;
@@ -72,7 +75,8 @@ export default function Startup() {
     const r = report();
     if (!r) return 0;
     const o = overrides();
-    return r.items.filter((i) => (o.has(i.id) ? o.get(i.id) : i.enabled)).length;
+    return r.items.filter((i) => (o.has(i.id) ? o.get(i.id) : i.enabled))
+      .length;
   });
 
   const onToggle = async (item: StartupItem) => {
@@ -95,15 +99,18 @@ export default function Startup() {
     try {
       await startupToggle(item.source, item.path, next);
       setStatus({
-        tone: 'ok',
-        text: `${item.name} ${next ? 'enabled' : 'disabled'}.`,
+        tone: "ok",
+        text: `${item.name} ${next ? "enabled" : "disabled"}.`,
       });
     } catch (err) {
       // roll back the optimistic change
       const rolled = new Map(overrides());
       rolled.delete(item.id);
       setOverrides(rolled);
-      setStatus({ tone: 'error', text: `Couldn't toggle ${item.name}: ${String(err)}` });
+      setStatus({
+        tone: "error",
+        text: `Couldn't toggle ${item.name}: ${String(err)}`,
+      });
     } finally {
       const settled = new Set(pendingIds());
       settled.delete(item.id);
@@ -115,18 +122,28 @@ export default function Startup() {
   };
 
   return (
-    <div style={{ flex: 1, display: 'flex', 'flex-direction': 'column', 'min-width': 0 }}>
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        "flex-direction": "column",
+        "min-width": 0,
+      }}
+    >
       <SafaiToolbar
         breadcrumb="Maintenance"
         title="Startup Items"
         subtitle="Audit and disable apps that launch at login."
         right={
-          <div style={{ display: 'flex', gap: '8px', 'align-items': 'center' }}>
-            <span style={{ 'font-size': '12px', color: 'var(--safai-fg-2)' }}>
-              {formatCount(enabledCount())} enabled ·{' '}
-              <span class="num" style={{ color: 'var(--safai-fg-0)', 'font-weight': 500 }}>
+          <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+            <span style={{ "font-size": "12px", color: "var(--safai-fg-2)" }}>
+              {formatCount(enabledCount())} enabled ·{" "}
+              <span
+                class="num"
+                style={{ color: "var(--safai-fg-0)", "font-weight": 500 }}
+              >
                 ~{bootEstimate().after.toFixed(1)}s
-              </span>{' '}
+              </span>{" "}
               boot
             </span>
             <button
@@ -135,10 +152,13 @@ export default function Startup() {
               disabled={report.loading}
               aria-busy={report.loading}
             >
-              <span class={report.loading ? 'safai-spin' : ''} style={{ display: 'inline-flex' }}>
+              <span
+                class={report.loading ? "safai-spin" : ""}
+                style={{ display: "inline-flex" }}
+              >
                 <Icon name="refresh" size={12} />
-              </span>{' '}
-              {report.loading ? 'Scanning…' : 'Rescan'}
+              </span>{" "}
+              {report.loading ? "Scanning…" : "Rescan"}
             </button>
           </div>
         }
@@ -147,16 +167,19 @@ export default function Startup() {
       <div
         style={{
           flex: 1,
-          overflow: 'auto',
-          padding: '24px',
-          display: 'grid',
-          'grid-template-columns': '1fr 320px',
-          gap: '20px',
+          overflow: "auto",
+          padding: "24px",
+          display: "grid",
+          "grid-template-columns": "1fr 320px",
+          gap: "20px",
         }}
       >
         <div>
           <Show when={report.error}>
-            <ErrorCard message={String(report.error)} onRetry={() => refetch()} />
+            <ErrorCard
+              message={String(report.error)}
+              onRetry={() => refetch()}
+            />
           </Show>
 
           <Show when={!report.error}>
@@ -168,7 +191,11 @@ export default function Startup() {
 
             <Show
               when={!report.loading || report()}
-              fallback={<For each={Array.from({ length: 4 })}>{() => <SkeletonRow />}</For>}
+              fallback={
+                <For each={Array.from({ length: 4 })}>
+                  {() => <SkeletonRow />}
+                </For>
+              }
             >
               <For each={grouped()}>
                 {(group) => (
@@ -190,19 +217,23 @@ export default function Startup() {
               {(r) => (
                 <div
                   style={{
-                    'margin-top': '18px',
-                    'font-size': '11px',
-                    color: 'var(--safai-fg-3)',
-                    display: 'flex',
-                    gap: '12px',
-                    'align-items': 'center',
-                    'flex-wrap': 'wrap',
+                    "margin-top": "18px",
+                    "font-size": "11px",
+                    color: "var(--safai-fg-3)",
+                    display: "flex",
+                    gap: "12px",
+                    "align-items": "center",
+                    "flex-wrap": "wrap",
                   }}
                   aria-live="polite"
                 >
-                  <span>Last scanned {formatRelativeTime(r().scannedAt, clock())}</span>
+                  <span>
+                    Last scanned {formatRelativeTime(r().scannedAt, clock())}
+                  </span>
                   <span>·</span>
-                  <span>Scanned in {Math.max(1, Math.round(r().durationMs))} ms</span>
+                  <span>
+                    Scanned in {Math.max(1, Math.round(r().durationMs))} ms
+                  </span>
                   <span>·</span>
                   <span>{formatCount(r().items.length)} items catalogued</span>
                   <span>·</span>
@@ -242,51 +273,64 @@ function BootHero(props: { before: number; after: number; loading: boolean }) {
   const beforePct = () => (props.before / max()) * 100;
   const afterPct = () => (props.after / max()) * 100;
   const saved = () => Math.max(0, props.before - props.after);
-  const mood = () => (saved() > 1 ? 'zoom' : 'sleepy');
+  const mood = () => (saved() > 1 ? "zoom" : "sleepy");
 
   return (
     <div
       class="safai-card"
       style={{
-        padding: '20px 24px',
-        'margin-bottom': '16px',
-        display: 'flex',
-        'align-items': 'center',
-        gap: '24px',
+        padding: "20px 24px",
+        "margin-bottom": "16px",
+        display: "flex",
+        "align-items": "center",
+        gap: "24px",
       }}
     >
       <Suds size={56} mood={mood()} float />
       <div style={{ flex: 1 }}>
-        <div style={{ 'font-size': '12px', color: 'var(--safai-fg-3)', 'margin-bottom': '6px' }}>
+        <div
+          style={{
+            "font-size": "12px",
+            color: "var(--safai-fg-3)",
+            "margin-bottom": "6px",
+          }}
+        >
           Estimated boot time
         </div>
-        <div style={{ display: 'flex', 'align-items': 'center', gap: '12px' }}>
+        <div style={{ display: "flex", "align-items": "center", gap: "12px" }}>
           <span
             class="num"
             style={{
-              'font-size': '28px',
-              'font-family': 'var(--safai-font-display)',
-              'font-weight': 600,
-              color: 'var(--safai-fg-0)',
-              'font-variant-numeric': 'tabular-nums',
+              "font-size": "28px",
+              "font-family": "var(--safai-font-display)",
+              "font-weight": 600,
+              color: "var(--safai-fg-0)",
+              "font-variant-numeric": "tabular-nums",
             }}
           >
-            {props.loading ? '—' : `${props.after.toFixed(1)}s`}
+            {props.loading ? "-" : `${props.after.toFixed(1)}s`}
           </span>
           <Show when={saved() > 0.1 && !props.loading}>
             <span
               class="safai-pill"
               style={{
-                background: 'var(--safai-cyan-dim)',
-                color: 'var(--safai-cyan)',
-                'font-size': '11px',
+                background: "var(--safai-cyan-dim)",
+                color: "var(--safai-cyan)",
+                "font-size": "11px",
               }}
             >
               −{saved().toFixed(1)}s saved
             </span>
           </Show>
         </div>
-        <div style={{ 'margin-top': '12px', display: 'flex', 'flex-direction': 'column', gap: '6px' }}>
+        <div
+          style={{
+            "margin-top": "12px",
+            display: "flex",
+            "flex-direction": "column",
+            gap: "6px",
+          }}
+        >
           <Bar label="Before" value={props.before} pct={beforePct()} dim />
           <Bar label="After" value={props.after} pct={afterPct()} dim={false} />
         </div>
@@ -295,16 +339,21 @@ function BootHero(props: { before: number; after: number; loading: boolean }) {
   );
 }
 
-function Bar(props: { label: string; value: number; pct: number; dim: boolean }) {
+function Bar(props: {
+  label: string;
+  value: number;
+  pct: number;
+  dim: boolean;
+}) {
   return (
-    <div style={{ display: 'flex', 'align-items': 'center', gap: '10px' }}>
+    <div style={{ display: "flex", "align-items": "center", gap: "10px" }}>
       <span
         style={{
-          width: '50px',
-          'font-size': '10px',
-          color: 'var(--safai-fg-3)',
-          'text-transform': 'uppercase',
-          'letter-spacing': '0.12em',
+          width: "50px",
+          "font-size": "10px",
+          color: "var(--safai-fg-3)",
+          "text-transform": "uppercase",
+          "letter-spacing": "0.12em",
         }}
       >
         {props.label}
@@ -312,24 +361,29 @@ function Bar(props: { label: string; value: number; pct: number; dim: boolean })
       <div
         style={{
           flex: 1,
-          height: '8px',
-          'border-radius': '4px',
-          background: 'var(--safai-bg-2)',
-          overflow: 'hidden',
+          height: "8px",
+          "border-radius": "4px",
+          background: "var(--safai-bg-2)",
+          overflow: "hidden",
         }}
       >
         <div
           style={{
-            height: '100%',
+            height: "100%",
             width: `${Math.min(100, Math.max(0, props.pct))}%`,
-            background: props.dim ? 'var(--safai-fg-3)' : 'var(--safai-cyan)',
-            transition: 'width 180ms ease-out',
+            background: props.dim ? "var(--safai-fg-3)" : "var(--safai-cyan)",
+            transition: "width 180ms ease-out",
           }}
         />
       </div>
       <span
         class="num"
-        style={{ width: '52px', 'text-align': 'right', 'font-size': '12px', color: 'var(--safai-fg-1)' }}
+        style={{
+          width: "52px",
+          "text-align": "right",
+          "font-size": "12px",
+          color: "var(--safai-fg-1)",
+        }}
       >
         {props.value.toFixed(1)}s
       </span>
@@ -345,22 +399,27 @@ function SourceGroup(props: {
   onToggle: (item: StartupItem) => void;
 }) {
   return (
-    <div class="safai-card" style={{ 'margin-bottom': '12px', overflow: 'hidden' }}>
+    <div
+      class="safai-card"
+      style={{ "margin-bottom": "12px", overflow: "hidden" }}
+    >
       <div
         style={{
-          padding: '10px 16px',
-          'border-bottom': '1px solid var(--safai-line)',
-          display: 'flex',
-          'align-items': 'center',
-          gap: '10px',
-          'font-size': '11px',
-          color: 'var(--safai-fg-3)',
-          'letter-spacing': '0.12em',
-          'text-transform': 'uppercase',
+          padding: "10px 16px",
+          "border-bottom": "1px solid var(--safai-line)",
+          display: "flex",
+          "align-items": "center",
+          gap: "10px",
+          "font-size": "11px",
+          color: "var(--safai-fg-3)",
+          "letter-spacing": "0.12em",
+          "text-transform": "uppercase",
         }}
       >
         <span>{labelForSource(props.source)}</span>
-        <span style={{ color: 'var(--safai-fg-2)' }}>· {props.items.length}</span>
+        <span style={{ color: "var(--safai-fg-2)" }}>
+          · {props.items.length}
+        </span>
       </div>
       <For each={props.items}>
         {(item) => (
@@ -393,44 +452,48 @@ function ItemRow(props: {
   return (
     <div
       style={{
-        padding: '14px 16px',
-        display: 'flex',
-        'align-items': 'center',
-        gap: '12px',
-        'border-bottom': '1px solid var(--safai-line)',
+        padding: "14px 16px",
+        display: "flex",
+        "align-items": "center",
+        gap: "12px",
+        "border-bottom": "1px solid var(--safai-line)",
       }}
     >
       <div
         style={{
-          width: '28px',
-          height: '28px',
-          'border-radius': '7px',
+          width: "28px",
+          height: "28px",
+          "border-radius": "7px",
           background: `color-mix(in oklab, ${impactColour()} 16%, transparent)`,
-          display: 'flex',
-          'align-items': 'center',
-          'justify-content': 'center',
-          'flex-shrink': 0,
+          display: "flex",
+          "align-items": "center",
+          "justify-content": "center",
+          "flex-shrink": 0,
         }}
       >
-        <Icon name={props.item.icon as IconName} size={13} color={impactColour()} />
+        <Icon
+          name={props.item.icon as IconName}
+          size={13}
+          color={impactColour()}
+        />
       </div>
-      <div style={{ flex: 1, 'min-width': 0 }}>
+      <div style={{ flex: 1, "min-width": 0 }}>
         <div
           style={{
-            display: 'flex',
-            'align-items': 'center',
-            gap: '8px',
-            'margin-bottom': '3px',
+            display: "flex",
+            "align-items": "center",
+            gap: "8px",
+            "margin-bottom": "3px",
           }}
         >
           <span
             style={{
-              'font-size': '13px',
-              'font-weight': 500,
-              color: 'var(--safai-fg-0)',
-              'white-space': 'nowrap',
-              overflow: 'hidden',
-              'text-overflow': 'ellipsis',
+              "font-size": "13px",
+              "font-weight": 500,
+              color: "var(--safai-fg-0)",
+              "white-space": "nowrap",
+              overflow: "hidden",
+              "text-overflow": "ellipsis",
             }}
           >
             {props.item.name}
@@ -440,7 +503,7 @@ function ItemRow(props: {
             style={{
               background: `color-mix(in oklab, ${impactColour()} 18%, transparent)`,
               color: impactColour(),
-              'font-size': '9px',
+              "font-size": "9px",
             }}
             title={`${BOOT_SECONDS_PER_IMPACT[props.item.impact].toFixed(1)}s boot impact`}
           >
@@ -450,9 +513,9 @@ function ItemRow(props: {
             <span
               class="safai-pill"
               style={{
-                background: 'var(--safai-bg-2)',
-                color: 'var(--safai-fg-3)',
-                'font-size': '9px',
+                background: "var(--safai-bg-2)",
+                color: "var(--safai-fg-3)",
+                "font-size": "9px",
               }}
             >
               system
@@ -462,15 +525,15 @@ function ItemRow(props: {
         <div
           class="mono"
           style={{
-            'font-size': '11px',
-            color: 'var(--safai-fg-3)',
-            'white-space': 'nowrap',
-            overflow: 'hidden',
-            'text-overflow': 'ellipsis',
+            "font-size": "11px",
+            color: "var(--safai-fg-3)",
+            "white-space": "nowrap",
+            overflow: "hidden",
+            "text-overflow": "ellipsis",
           }}
           title={props.item.command || props.item.path}
         >
-          {props.item.command || props.item.path}
+          {truncateMiddle(props.item.command || props.item.path, 120)}
         </div>
       </div>
       <Toggle
@@ -478,7 +541,7 @@ function ItemRow(props: {
         disabled={!canToggle() || props.isPending}
         pending={props.isPending}
         onToggle={props.onToggle}
-        title={canToggle() ? '' : 'Read-only — requires admin privileges'}
+        title={canToggle() ? "" : "Read-only - requires admin privileges"}
       />
     </div>
   );
@@ -503,30 +566,30 @@ function Toggle(props: {
       }}
       title={props.title}
       style={{
-        width: '42px',
-        height: '24px',
-        'border-radius': '12px',
-        border: '1px solid var(--safai-line)',
-        background: props.checked ? 'var(--safai-cyan)' : 'var(--safai-bg-2)',
-        position: 'relative',
-        cursor: props.disabled ? 'not-allowed' : 'pointer',
+        width: "42px",
+        height: "24px",
+        "border-radius": "12px",
+        border: "1px solid var(--safai-line)",
+        background: props.checked ? "var(--safai-cyan)" : "var(--safai-bg-2)",
+        position: "relative",
+        cursor: props.disabled ? "not-allowed" : "pointer",
         opacity: props.disabled ? 0.5 : 1,
-        transition: 'background 160ms ease-out',
+        transition: "background 160ms ease-out",
         padding: 0,
-        'flex-shrink': 0,
+        "flex-shrink": 0,
       }}
     >
       <span
         style={{
-          position: 'absolute',
-          top: '2px',
-          left: props.checked ? '20px' : '2px',
-          width: '18px',
-          height: '18px',
-          'border-radius': '9px',
-          background: 'oklch(0.98 0.02 240)',
-          transition: 'left 160ms ease-out',
-          'box-shadow': '0 1px 2px oklch(0 0 0 / 0.2)',
+          position: "absolute",
+          top: "2px",
+          left: props.checked ? "20px" : "2px",
+          width: "18px",
+          height: "18px",
+          "border-radius": "9px",
+          background: "oklch(0.98 0.02 240)",
+          transition: "left 160ms ease-out",
+          "box-shadow": "0 1px 2px oklch(0 0 0 / 0.2)",
         }}
       />
     </button>
@@ -535,12 +598,12 @@ function Toggle(props: {
 
 function impactAccent(impact: StartupImpact): string {
   switch (impact) {
-    case 'high':
-      return 'var(--safai-coral)';
-    case 'medium':
-      return 'var(--safai-amber, var(--safai-fg-1))';
-    case 'low':
-      return 'var(--safai-cyan)';
+    case "high":
+      return "var(--safai-coral)";
+    case "medium":
+      return "var(--safai-amber, var(--safai-fg-1))";
+    case "low":
+      return "var(--safai-cyan)";
   }
 }
 
@@ -550,60 +613,77 @@ function SidePane(props: {
   after: number;
 }) {
   const heavyCount = () =>
-    props.report?.items.filter((i) => i.enabled && i.impact === 'high').length ?? 0;
+    props.report?.items.filter((i) => i.enabled && i.impact === "high")
+      .length ?? 0;
   const note = () => {
-    if (!props.report) return 'Loading your login agenda…';
+    if (!props.report) return "Loading your login agenda…";
     if (props.report.items.length === 0) {
-      return 'Nothing launches at login on this machine. Boot will be snappy either way.';
+      return "Nothing launches at login on this machine. Boot will be snappy either way.";
     }
     if (heavyCount() > 0) {
-      return `${heavyCount()} heavy app${heavyCount() === 1 ? '' : 's'} launches at login. Flipping them off cuts ~${(
+      return `${heavyCount()} heavy app${heavyCount() === 1 ? "" : "s"} launches at login. Flipping them off cuts ~${(
         heavyCount() * BOOT_SECONDS_PER_IMPACT.high
       ).toFixed(1)}s from the boot budget.`;
     }
-    return 'Looks tidy — only lightweight helpers launch at login.';
+    return "Looks tidy - only lightweight helpers launch at login.";
   };
 
   return (
     <div>
-      <div class="safai-card" style={{ padding: '18px', 'margin-bottom': '12px' }}>
+      <div
+        class="safai-card"
+        style={{ padding: "18px", "margin-bottom": "12px" }}
+      >
         <div
           style={{
-            display: 'flex',
-            'align-items': 'center',
-            gap: '10px',
-            'margin-bottom': '12px',
+            display: "flex",
+            "align-items": "center",
+            gap: "10px",
+            "margin-bottom": "12px",
           }}
         >
-          <Suds size={36} mood={heavyCount() > 2 ? 'shocked' : 'happy'} />
-          <div style={{ 'font-size': '12px', color: 'var(--safai-fg-1)', 'font-weight': 500 }}>
+          <Suds size={36} mood={heavyCount() > 2 ? "shocked" : "happy"} />
+          <div
+            style={{
+              "font-size": "12px",
+              color: "var(--safai-fg-1)",
+              "font-weight": 500,
+            }}
+          >
             Suds says
           </div>
         </div>
-        <div style={{ 'font-size': '13px', color: 'var(--safai-fg-1)', 'line-height': 1.5 }}>
+        <div
+          style={{
+            "font-size": "13px",
+            color: "var(--safai-fg-1)",
+            "line-height": 1.5,
+          }}
+        >
           {note()}
         </div>
         <div
           style={{
-            'font-size': '11px',
-            color: 'var(--safai-fg-3)',
-            'margin-top': '12px',
-            'padding-top': '12px',
-            'border-top': '1px solid var(--safai-line)',
+            "font-size": "11px",
+            color: "var(--safai-fg-3)",
+            "margin-top": "12px",
+            "padding-top": "12px",
+            "border-top": "1px solid var(--safai-line)",
           }}
         >
-          Toggles are reversible — flip an item back on any time. Nothing is deleted.
+          Toggles are reversible - flip an item back on any time. Nothing is
+          deleted.
         </div>
       </div>
 
-      <div class="safai-card" style={{ padding: '18px' }}>
+      <div class="safai-card" style={{ padding: "18px" }}>
         <div
           style={{
-            'font-size': '11px',
-            color: 'var(--safai-fg-3)',
-            'letter-spacing': '0.12em',
-            'text-transform': 'uppercase',
-            'margin-bottom': '12px',
+            "font-size": "11px",
+            color: "var(--safai-fg-3)",
+            "letter-spacing": "0.12em",
+            "text-transform": "uppercase",
+            "margin-bottom": "12px",
           }}
         >
           Impact legend
@@ -622,24 +702,26 @@ function LegendRow(props: { impact: StartupImpact }) {
   return (
     <div
       style={{
-        display: 'flex',
-        'align-items': 'center',
-        gap: '10px',
-        padding: '6px 0',
-        'font-size': '12px',
-        color: 'var(--safai-fg-2)',
+        display: "flex",
+        "align-items": "center",
+        gap: "10px",
+        padding: "6px 0",
+        "font-size": "12px",
+        color: "var(--safai-fg-2)",
       }}
     >
       <span
         style={{
-          width: '12px',
-          height: '12px',
-          'border-radius': '3px',
+          width: "12px",
+          height: "12px",
+          "border-radius": "3px",
           background: c,
         }}
       />
-      <span style={{ flex: 1, 'text-transform': 'capitalize' }}>{props.impact}</span>
-      <span class="num" style={{ color: 'var(--safai-fg-3)' }}>
+      <span style={{ flex: 1, "text-transform": "capitalize" }}>
+        {props.impact}
+      </span>
+      <span class="num" style={{ color: "var(--safai-fg-3)" }}>
         ~{secs.toFixed(1)}s/item
       </span>
     </div>
@@ -651,19 +733,26 @@ function EmptyState() {
     <div
       class="safai-card"
       style={{
-        padding: '40px 28px',
-        display: 'flex',
-        'align-items': 'center',
-        gap: '20px',
+        padding: "40px 28px",
+        display: "flex",
+        "align-items": "center",
+        gap: "20px",
       }}
     >
       <Suds size={64} mood="sleepy" />
       <div>
-        <div style={{ 'font-size': '14px', color: 'var(--safai-fg-0)', 'margin-bottom': '4px' }}>
+        <div
+          style={{
+            "font-size": "14px",
+            color: "var(--safai-fg-0)",
+            "margin-bottom": "4px",
+          }}
+        >
           Nothing launches at login
         </div>
-        <div style={{ 'font-size': '12px', color: 'var(--safai-fg-2)' }}>
-          No autostart entries, launch agents, or startup-folder items were found.
+        <div style={{ "font-size": "12px", color: "var(--safai-fg-2)" }}>
+          No autostart entries, launch agents, or startup-folder items were
+          found.
         </div>
       </div>
     </div>
@@ -671,7 +760,7 @@ function EmptyState() {
 }
 
 function StatusBanner(props: {
-  tone: 'ok' | 'error';
+  tone: "ok" | "error";
   text: string;
   onDismiss: () => void;
 }) {
@@ -680,31 +769,35 @@ function StatusBanner(props: {
       role="status"
       aria-live="polite"
       style={{
-        position: 'fixed',
-        bottom: '20px',
-        left: '50%',
-        transform: 'translateX(-50%)',
-        padding: '10px 16px',
-        'border-radius': 'var(--safai-r-md)',
-        background: props.tone === 'error' ? 'var(--safai-coral-dim)' : 'var(--safai-cyan-dim)',
-        color: props.tone === 'error' ? 'var(--safai-coral)' : 'var(--safai-cyan)',
-        'font-size': '12px',
-        display: 'flex',
-        'align-items': 'center',
-        gap: '10px',
-        'z-index': 500,
-        'box-shadow': '0 12px 32px oklch(0 0 0 / 0.4)',
+        position: "fixed",
+        bottom: "20px",
+        left: "50%",
+        transform: "translateX(-50%)",
+        padding: "10px 16px",
+        "border-radius": "var(--safai-r-md)",
+        background:
+          props.tone === "error"
+            ? "var(--safai-coral-dim)"
+            : "var(--safai-cyan-dim)",
+        color:
+          props.tone === "error" ? "var(--safai-coral)" : "var(--safai-cyan)",
+        "font-size": "12px",
+        display: "flex",
+        "align-items": "center",
+        gap: "10px",
+        "z-index": 500,
+        "box-shadow": "0 12px 32px oklch(0 0 0 / 0.4)",
       }}
     >
       <Icon
-        name={props.tone === 'error' ? 'warning' : 'check'}
+        name={props.tone === "error" ? "warning" : "check"}
         size={12}
         color="currentColor"
       />
       <span>{props.text}</span>
       <button
         class="safai-btn safai-btn--ghost"
-        style={{ height: '24px', 'font-size': '11px', padding: '0 8px' }}
+        style={{ height: "24px", "font-size": "11px", padding: "0 8px" }}
         onClick={props.onDismiss}
       >
         Dismiss
@@ -718,13 +811,13 @@ function SkeletonRow() {
     <div
       class="safai-card"
       style={{
-        padding: '14px 16px',
-        height: '54px',
-        'margin-bottom': '8px',
+        padding: "14px 16px",
+        height: "54px",
+        "margin-bottom": "8px",
         background:
-          'linear-gradient(90deg, var(--safai-bg-2) 0%, var(--safai-bg-3) 50%, var(--safai-bg-2) 100%)',
-        'background-size': '200% 100%',
-        animation: 'safai-shimmer 1.4s ease-in-out infinite',
+          "linear-gradient(90deg, var(--safai-bg-2) 0%, var(--safai-bg-3) 50%, var(--safai-bg-2) 100%)",
+        "background-size": "200% 100%",
+        animation: "safai-shimmer 1.4s ease-in-out infinite",
       }}
     />
   );
@@ -735,20 +828,29 @@ function ErrorCard(props: { message: string; onRetry: () => void }) {
     <div
       class="safai-card"
       style={{
-        padding: '24px 28px',
-        display: 'flex',
-        'align-items': 'center',
-        gap: '20px',
-        'margin-bottom': '20px',
-        border: '1px solid oklch(0.68 0.18 25 / 0.4)',
+        padding: "24px 28px",
+        display: "flex",
+        "align-items": "center",
+        gap: "20px",
+        "margin-bottom": "20px",
+        border: "1px solid oklch(0.68 0.18 25 / 0.4)",
       }}
     >
       <Suds size={56} mood="shocked" />
       <div style={{ flex: 1 }}>
-        <div style={{ 'font-size': '14px', color: 'var(--safai-fg-0)', 'margin-bottom': '4px' }}>
+        <div
+          style={{
+            "font-size": "14px",
+            color: "var(--safai-fg-0)",
+            "margin-bottom": "4px",
+          }}
+        >
           Couldn't scan startup items
         </div>
-        <div class="mono" style={{ 'font-size': '11px', color: 'var(--safai-fg-2)' }}>
+        <div
+          class="mono"
+          style={{ "font-size": "11px", color: "var(--safai-fg-2)" }}
+        >
           {props.message}
         </div>
       </div>
