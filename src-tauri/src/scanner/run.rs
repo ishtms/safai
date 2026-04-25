@@ -702,6 +702,12 @@ mod tests {
         );
     }
 
+    // %TEMP% on windows sits under AppData\Local\Temp, which the
+    // classifier hard-codes as a SAFE marker. tempdir-based tests can't
+    // exercise the FOUND verdict here without escaping to a path the
+    // CI runner can't reliably write to. classifier itself has unit
+    // coverage in scanner::classify.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn large_file_emits_found_event() {
         let tmp = tempfile::tempdir().unwrap();
