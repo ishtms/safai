@@ -32,7 +32,7 @@
   },
   "plugins": {
     "updater": {
-      "active": true,
+      "active": false,
       "endpoints": [
         "https://updater.safai.dev/{{target}}/{{current_version}}"
       ],
@@ -42,7 +42,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg", "nsis", "msi", "appimage", "deb", "rpm"],
     "category": "Utility",
     "shortDescription": "Open-source cross-platform system cleaner",
     "longDescription": "Safai is an open-source, cross-platform system cleaner: junk, duplicates, large & old files, privacy data, startup items, memory/activity, and malware - with an undo-safe cleaner engine so nothing is ever hard-deleted.",
