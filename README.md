@@ -1,8 +1,12 @@
 # safai
 
-open-source system cleaner for mac, linux and windows. built on tauri + solid.
+> [!NOTE]
+>
+> I haven't tested it on windows yet, but it should run fine. 
 
-finds junk, duplicates, big old files, browser crud, startup hogs, and malware.
+Open-source system cleaner for mac, linux and windows. built on tauri + solid.
+
+Finds junk, duplicates, big old files, browser crud, startup hogs, and malware.
 nothing gets hard-deleted, everything goes to a safai-owned graveyard so you can
 restore the last clean if you change your mind.
 
@@ -13,7 +17,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-needs rust (stable) and pnpm. on linux you also want webkit2gtk-4.1 and the
+Needs rust (stable) and pnpm. on linux you also want webkit2gtk-4.1 and the
 usual tauri deps.
 
 ## build
@@ -22,7 +26,7 @@ usual tauri deps.
 pnpm tauri build
 ```
 
-spits out dmg + app on mac, msi + nsis on windows, appimage + deb on linux.
+Spits out dmg + app on mac, msi + nsis on windows, appimage + deb on linux.
 
 ## tests
 
