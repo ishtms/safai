@@ -729,6 +729,7 @@ mod tests {
         assert_eq!(items[0].name, "a");
     }
 
+    #[cfg(unix)]
     #[test]
     fn list_plist_dir_skips_symlinks() {
         let dir = TempDir::new().unwrap();
