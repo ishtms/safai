@@ -944,14 +944,11 @@ mod tests {
             rel_to_home: vec!["../outside", "/abs/path", "Library/OK"],
         };
         let out = resolve_targets(&home, &spec, &cat, &["Default".to_string()]);
-        // only Cache + Library/OK survive
-        let paths: Vec<String> = out
-            .iter()
-            .map(|(p, _)| p.to_string_lossy().into_owned())
-            .collect();
-        assert!(paths.iter().any(|p| p.ends_with("Chrome/Default/Cache")));
-        assert!(paths.iter().any(|p| p.ends_with("Library/OK")));
-        assert_eq!(paths.len(), 2);
+        // only Cache + Library/OK survive. Path::ends_with is
+        // component-based so it stays correct under windows backslashes.
+        assert!(out.iter().any(|(p, _)| p.ends_with("Chrome/Default/Cache")));
+        assert!(out.iter().any(|(p, _)| p.ends_with("Library/OK")));
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

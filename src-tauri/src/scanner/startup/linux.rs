@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
@@ -391,7 +392,16 @@ pub fn toggle_systemd_user(home: &Path, unit_name: &str, enabled: bool) -> Resul
             // idempotent
             return Ok(());
         }
-        unix_fs::symlink(&target, &link).map_err(|e| format!("create symlink: {e}"))
+        #[cfg(unix)]
+        {
+            unix_fs::symlink(&target, &link).map_err(|e| format!("create symlink: {e}"))
+        }
+        #[cfg(not(unix))]
+        {
+            // never reached, scan dispatch gates by Os::Linux. stub keeps it compilable
+            let _ = (&target, &link);
+            Err("systemd toggle unsupported on this platform".to_string())
+        }
     } else {
         // symlink_metadata so broken symlinks still get recognised
         match fs::symlink_metadata(&link) {
@@ -422,7 +432,7 @@ fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

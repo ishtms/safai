@@ -363,6 +363,7 @@ mod tests {
         assert!(!slack_after);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn toggle_startup_round_trips_systemd() {
         let dir = TempDir::new().unwrap();

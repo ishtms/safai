@@ -461,7 +461,10 @@ mod tests {
         let app = caches
             .paths
             .iter()
-            .find(|d| d.path.ends_with("/App"))
+            // Path::ends_with is component-based, "/App" parses as
+            // [RootDir, "App"] which never matches a non-root suffix.
+            // bare component name works on both posix and windows.
+            .find(|d| d.path.ends_with("App"))
             .expect("App folder detail present");
         // newest mtime populated + within an hour
         let mt = app.last_modified.expect("mtime populated");

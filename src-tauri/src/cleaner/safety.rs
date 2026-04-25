@@ -180,8 +180,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    // posix-style absolute paths aren't is_absolute() on windows, classify
+    // would short-circuit with "path must be absolute" before exercising
+    // the actual blocklist logic. prefix C: on windows so the path is a
+    // real absolute and the classifier runs end-to-end. blocklist already
+    // has both posix and C:\ entries.
+    fn abs(unix_style: &str) -> PathBuf {
+        #[cfg(windows)]
+        { PathBuf::from(format!("C:{unix_style}")) }
+        #[cfg(not(windows))]
+        { PathBuf::from(unix_style) }
+    }
+
     fn home_of(name: &str) -> PathBuf {
-        PathBuf::from("/home").join(name)
+        abs(&format!("/home/{name}"))
     }
 
     // ---------- normalize ----------
@@ -302,7 +314,7 @@ mod tests {
         // /tmp isn't blocklisted, it's a legit junk catalog base on
         // linux. /tmp itself also passes, policy only guards system
         // paths
-        assert_eq!(classify(&home, &PathBuf::from("/tmp/leftover.lock")), None);
+        assert_eq!(classify(&home, &abs("/tmp/leftover.lock")), None);
     }
 
     #[test]
@@ -333,7 +345,7 @@ mod tests {
     fn dotdot_inside_home_is_fine() {
         let home = home_of("adrian");
         // /home/adrian/.cache/x/.. -> /home/adrian/.cache, still home
-        let p = PathBuf::from("/home/adrian/.cache/x/..");
+        let p = abs("/home/adrian/.cache/x/..");
         assert_eq!(classify(&home, &p), None);
     }
 
@@ -348,7 +360,7 @@ mod tests {
     #[test]
     fn reason_strings_are_human_readable() {
         let home = home_of("a");
-        let r = classify(&home, &PathBuf::from("/")).unwrap();
+        let r = classify(&home, &abs("/")).unwrap();
         assert!(r.starts_with("refusing"));
         let r = classify(&home, &home.join("Documents")).unwrap();
         assert!(r.contains("primary user folder"));

@@ -2,7 +2,7 @@ name: Release
 
 # Triggered by pushing a `v*` tag. The matrix builds signed installers
 # for macOS (universal .dmg + .app), Windows (NSIS + MSI) and Linux
-# (AppImage + .deb) and attaches them to a draft GitHub release that the
+# (AppImage + .deb + .rpm) and attaches them to a draft GitHub release that the
 # maintainer promotes once smoke-tested.
 #
 # Signing / notarization is opt-in via repository secrets - if the
@@ -71,7 +71,8 @@ jobs:
             wget \
             file \
             libxdo-dev \
-            libssl-dev
+            libssl-dev \
+            rpm
 
       - name: Install JS deps
         run: pnpm install --frozen-lockfile
@@ -105,9 +106,7 @@ jobs:
             Installers:
             - macOS - `.dmg` (universal)
             - Windows - `.msi` + `.exe` (NSIS)
-            - Linux - `.AppImage` + `.deb`
-
-            Auto-update: launch the existing Safai and accept the "Update and relaunch" banner.
+            - Linux - `.AppImage`, `.deb`, `.rpm`
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

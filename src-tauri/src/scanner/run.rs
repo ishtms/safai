@@ -571,33 +571,39 @@ mod tests {
 
     #[test]
     fn elapsed_freezes_during_pause() {
+        // intervals are big enough that CI scheduler jitter (mac runners can
+        // overshoot a sleep by 100ms+ under load) is small vs the windows
+        // we're measuring, otherwise this gets flaky
         let c = ScanController::new();
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(80));
         let before_pause = c.active_elapsed_ms();
-        assert!(before_pause >= 30, "expected some elapsed, got {before_pause}");
+        assert!(before_pause >= 60, "expected some elapsed, got {before_pause}");
 
         c.set_state(ScanState::Paused);
         let at_pause = c.active_elapsed_ms();
-        std::thread::sleep(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(200));
         let after_pause = c.active_elapsed_ms();
 
-        // after pausing, elapsed must not have moved (modulo ~5ms rounding
-        // from the transition itself, we just bound it)
+        // pause must freeze elapsed. small slack for the transition itself
         assert!(
-            after_pause < at_pause + 10,
+            after_pause < at_pause + 25,
             "elapsed advanced during pause: {at_pause} -> {after_pause}",
         );
 
         c.set_state(ScanState::Running);
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(80));
         let after_resume = c.active_elapsed_ms();
         assert!(
-            after_resume >= after_pause + 25,
+            after_resume >= after_pause + 50,
             "elapsed did not resume: {after_pause} -> {after_resume}",
         );
 
-        // total active ~= first 40ms + 30ms, never counts the 60ms paused window
-        assert!(after_resume < before_pause + 100);
+        // total active ~= 80 + 80, never counts the 200 paused window. bad
+        // case (pause ignored) lands near +280, good case near +80
+        assert!(
+            after_resume < before_pause + 250,
+            "pause window leaked into elapsed: {before_pause} -> {after_resume}",
+        );
     }
 
     #[test]
@@ -696,6 +702,12 @@ mod tests {
         );
     }
 
+    // %TEMP% on windows sits under AppData\Local\Temp, which the
+    // classifier hard-codes as a SAFE marker. tempdir-based tests can't
+    // exercise the FOUND verdict here without escaping to a path the
+    // CI runner can't reliably write to. classifier itself has unit
+    // coverage in scanner::classify.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn large_file_emits_found_event() {
         let tmp = tempfile::tempdir().unwrap();
