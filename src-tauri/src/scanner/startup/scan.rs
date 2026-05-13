@@ -13,8 +13,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use super::types::{StartupImpact, StartupItem, StartupReport, StartupSource, ToggleResult};
 use super::{linux, mac, windows};
 
-pub use super::super::junk::catalog::Os;
 pub use super::super::junk::catalog::current_os;
+pub use super::super::junk::catalog::Os;
 
 /// baseline boot seconds for "OS booting itself" on top of startup items.
 /// rough mid-range laptop average. "before" is always >= this so UI comparison
@@ -145,10 +145,7 @@ pub fn toggle_startup(
     enabled: bool,
 ) -> Result<ToggleResult, String> {
     if !source.is_toggleable() {
-        return Err(format!(
-            "source {} is read-only from safai",
-            source.slug(),
-        ));
+        return Err(format!("source {} is read-only from safai", source.slug(),));
     }
     validate_path_matches_source(home, source, path)?;
     match source {
@@ -161,9 +158,7 @@ pub fn toggle_startup(
             linux::toggle_systemd_user(home, name, enabled)?;
         }
         StartupSource::MacLaunchAgentUser => mac::toggle_user_agent(path, enabled)?,
-        StartupSource::WindowsStartupFolder => {
-            windows::toggle_startup_folder(path, enabled)?
-        }
+        StartupSource::WindowsStartupFolder => windows::toggle_startup_folder(path, enabled)?,
         StartupSource::WindowsRunUser => {
             let name = path
                 .file_name()
@@ -207,8 +202,14 @@ fn validate_path_matches_source(
         ));
     }
     // reject `..` segments. catalog root + `..` can escape lexically even after starts_with.
-    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err(format!("path {} contains parent-directory components", path.display()));
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "path {} contains parent-directory components",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -273,7 +274,11 @@ mod tests {
         let report = scan_startup(&home, Os::Linux);
         // Slack = high, Random + syncthing = low. Slack must come first.
         let slack_idx = report.items.iter().position(|i| i.name == "Slack").unwrap();
-        let random_idx = report.items.iter().position(|i| i.name == "Random").unwrap();
+        let random_idx = report
+            .items
+            .iter()
+            .position(|i| i.name == "Random")
+            .unwrap();
         assert!(slack_idx < random_idx);
     }
 
@@ -301,7 +306,10 @@ mod tests {
         let report = scan_startup(&home, Os::Mac);
         assert_eq!(report.platform, "mac");
         assert!(
-            report.items.iter().any(|i| i.name == "com.example.foo" && i.enabled),
+            report
+                .items
+                .iter()
+                .any(|i| i.name == "com.example.foo" && i.enabled),
             "items: {:?}",
             report.items,
         );
@@ -348,18 +356,22 @@ mod tests {
         let home = linux_home(&dir);
         let slack = linux::autostart_dir(&home).join("slack.desktop");
         let before = scan_startup(&home, Os::Linux);
-        let slack_before = before.items.iter().find(|i| i.name == "Slack").unwrap().enabled;
+        let slack_before = before
+            .items
+            .iter()
+            .find(|i| i.name == "Slack")
+            .unwrap()
+            .enabled;
         assert!(slack_before);
-        let res = toggle_startup(
-            &home,
-            StartupSource::LinuxAutostart,
-            &slack,
-            false,
-        )
-        .unwrap();
+        let res = toggle_startup(&home, StartupSource::LinuxAutostart, &slack, false).unwrap();
         assert!(!res.enabled);
         let after = scan_startup(&home, Os::Linux);
-        let slack_after = after.items.iter().find(|i| i.name == "Slack").unwrap().enabled;
+        let slack_after = after
+            .items
+            .iter()
+            .find(|i| i.name == "Slack")
+            .unwrap()
+            .enabled;
         assert!(!slack_after);
     }
 
@@ -369,15 +381,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let home = linux_home(&dir);
         let unit = linux::systemd_user_dir(&home).join("syncthing.service");
-        toggle_startup(
-            &home,
-            StartupSource::LinuxSystemdUser,
-            &unit,
-            true,
-        )
-        .unwrap();
+        toggle_startup(&home, StartupSource::LinuxSystemdUser, &unit, true).unwrap();
         let items = linux::list_systemd_user(&home);
-        assert!(items.iter().find(|i| i.name == "syncthing.service").unwrap().enabled);
+        assert!(
+            items
+                .iter()
+                .find(|i| i.name == "syncthing.service")
+                .unwrap()
+                .enabled
+        );
     }
 
     #[test]
@@ -389,13 +401,8 @@ mod tests {
             &somewhere_else,
             "[Desktop Entry]\nType=Application\nName=Evil\nExec=/x\n",
         );
-        let err = toggle_startup(
-            &home,
-            StartupSource::LinuxAutostart,
-            &somewhere_else,
-            false,
-        )
-        .unwrap_err();
+        let err = toggle_startup(&home, StartupSource::LinuxAutostart, &somewhere_else, false)
+            .unwrap_err();
         assert!(err.contains("not under the expected root"), "got: {err}");
     }
 
@@ -404,13 +411,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let home = linux_home(&dir);
         let sneaky = linux::autostart_dir(&home).join("../../../etc/hosts");
-        let err = toggle_startup(
-            &home,
-            StartupSource::LinuxAutostart,
-            &sneaky,
-            false,
-        )
-        .unwrap_err();
+        let err = toggle_startup(&home, StartupSource::LinuxAutostart, &sneaky, false).unwrap_err();
         assert!(err.contains("parent-directory") || err.contains("not under"));
     }
 
@@ -444,13 +445,7 @@ mod tests {
 </dict></plist>"#,
         )
         .unwrap();
-        toggle_startup(
-            &home,
-            StartupSource::MacLaunchAgentUser,
-            &plist_path,
-            false,
-        )
-        .unwrap();
+        toggle_startup(&home, StartupSource::MacLaunchAgentUser, &plist_path, false).unwrap();
         let items = mac::list_user_agents(&home);
         assert!(!items[0].enabled);
     }
@@ -463,13 +458,7 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         let lnk = folder.join("App.lnk");
         fs::write(&lnk, b"x").unwrap();
-        toggle_startup(
-            &home,
-            StartupSource::WindowsStartupFolder,
-            &lnk,
-            false,
-        )
-        .unwrap();
+        toggle_startup(&home, StartupSource::WindowsStartupFolder, &lnk, false).unwrap();
         assert!(!lnk.exists());
         assert!(folder.join("App.lnk.disabled").exists());
     }

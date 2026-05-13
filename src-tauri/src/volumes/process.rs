@@ -118,7 +118,14 @@ fn is_pseudo(v: &RawVolume, platform: Platform) -> bool {
     let fs = v.file_system.to_ascii_lowercase();
     if matches!(
         fs.as_str(),
-        "squashfs" | "tmpfs" | "devtmpfs" | "proc" | "sysfs" | "overlay" | "autofs" | "fuse.snapfuse"
+        "squashfs"
+            | "tmpfs"
+            | "devtmpfs"
+            | "proc"
+            | "sysfs"
+            | "overlay"
+            | "autofs"
+            | "fuse.snapfuse"
     ) {
         return true;
     }
@@ -149,7 +156,11 @@ fn is_pseudo(v: &RawVolume, platform: Platform) -> bool {
 
 fn dedupe_by_mount(list: &mut Vec<RawVolume>) {
     // same mount twice (linux bind mounts) -> keep the larger
-    list.sort_by(|a, b| a.mount_point.cmp(&b.mount_point).then(b.total_bytes.cmp(&a.total_bytes)));
+    list.sort_by(|a, b| {
+        a.mount_point
+            .cmp(&b.mount_point)
+            .then(b.total_bytes.cmp(&a.total_bytes))
+    });
     let mut last: Option<String> = None;
     list.retain(|v| {
         let dup = last.as_ref().is_some_and(|m| m == &v.mount_point);
@@ -227,8 +238,24 @@ mod tests {
         let input = vec![
             raw("/", "/", 500 * GB, 200 * GB, "ext4", VolumeKind::Ssd, false),
             raw("", "/proc", 0, 0, "proc", VolumeKind::Unknown, false),
-            raw("", "/run/user/1000", 3 * GB, 3 * GB, "tmpfs", VolumeKind::Unknown, false),
-            raw("", "/snap/core22/x", GB / 10, 0, "squashfs", VolumeKind::Unknown, false),
+            raw(
+                "",
+                "/run/user/1000",
+                3 * GB,
+                3 * GB,
+                "tmpfs",
+                VolumeKind::Unknown,
+                false,
+            ),
+            raw(
+                "",
+                "/snap/core22/x",
+                GB / 10,
+                0,
+                "squashfs",
+                VolumeKind::Unknown,
+                false,
+            ),
             raw("", "/dev/shm", GB, GB, "tmpfs", VolumeKind::Unknown, false),
         ];
         let out = process(input, Platform::Linux);
@@ -239,11 +266,51 @@ mod tests {
     #[test]
     fn strips_system_volumes_on_mac_but_keeps_data() {
         let input = vec![
-            raw("Macintosh HD", "/", 500 * GB, 200 * GB, "apfs", VolumeKind::Ssd, false),
-            raw("Data", "/System/Volumes/Data", 500 * GB, 200 * GB, "apfs", VolumeKind::Ssd, false),
-            raw("Preboot", "/System/Volumes/Preboot", GB, 0, "apfs", VolumeKind::Ssd, false),
-            raw("Recovery", "/System/Volumes/Recovery", GB, 0, "apfs", VolumeKind::Ssd, false),
-            raw("VM", "/System/Volumes/VM", GB, 0, "apfs", VolumeKind::Ssd, false),
+            raw(
+                "Macintosh HD",
+                "/",
+                500 * GB,
+                200 * GB,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "Data",
+                "/System/Volumes/Data",
+                500 * GB,
+                200 * GB,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "Preboot",
+                "/System/Volumes/Preboot",
+                GB,
+                0,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "Recovery",
+                "/System/Volumes/Recovery",
+                GB,
+                0,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "VM",
+                "/System/Volumes/VM",
+                GB,
+                0,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
         ];
         let out = process(input, Platform::Mac);
         // preboot/recovery/VM filtered, /Data kept (APFS sibling of /)
@@ -257,8 +324,24 @@ mod tests {
         // Mac here so friendly-name doesn't mask which raw entry
         // survived. total_bytes + label prove "b" won.
         let input = vec![
-            raw("a", "/Volumes/Data", 100 * GB, 50 * GB, "apfs", VolumeKind::Ssd, false),
-            raw("b", "/Volumes/Data", 200 * GB, 90 * GB, "apfs", VolumeKind::Ssd, false),
+            raw(
+                "a",
+                "/Volumes/Data",
+                100 * GB,
+                50 * GB,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "b",
+                "/Volumes/Data",
+                200 * GB,
+                90 * GB,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
         ];
         let out = process(input, Platform::Mac);
         assert_eq!(out.len(), 1);
@@ -269,8 +352,24 @@ mod tests {
     #[test]
     fn primary_is_root_on_unix() {
         let input = vec![
-            raw("Backup", "/mnt/backup", 2000 * GB, 100 * GB, "ext4", VolumeKind::Hdd, false),
-            raw("Macintosh HD", "/", 500 * GB, 200 * GB, "apfs", VolumeKind::Ssd, false),
+            raw(
+                "Backup",
+                "/mnt/backup",
+                2000 * GB,
+                100 * GB,
+                "ext4",
+                VolumeKind::Hdd,
+                false,
+            ),
+            raw(
+                "Macintosh HD",
+                "/",
+                500 * GB,
+                200 * GB,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
         ];
         let out = process(input, Platform::Mac);
         assert_eq!(out[0].mount_point, "/", "primary sorts to index 0");
@@ -281,8 +380,24 @@ mod tests {
     #[test]
     fn primary_is_c_drive_on_windows() {
         let input = vec![
-            raw("Data", "D:\\", 2000 * GB, 1000 * GB, "NTFS", VolumeKind::Hdd, false),
-            raw("System", "C:\\", 500 * GB, 200 * GB, "NTFS", VolumeKind::Ssd, false),
+            raw(
+                "Data",
+                "D:\\",
+                2000 * GB,
+                1000 * GB,
+                "NTFS",
+                VolumeKind::Hdd,
+                false,
+            ),
+            raw(
+                "System",
+                "C:\\",
+                500 * GB,
+                200 * GB,
+                "NTFS",
+                VolumeKind::Ssd,
+                false,
+            ),
         ];
         let out = process(input, Platform::Windows);
         assert_eq!(out[0].mount_point, "C:\\");
@@ -292,9 +407,33 @@ mod tests {
     #[test]
     fn primary_falls_back_to_largest_non_removable() {
         let input = vec![
-            raw("USB", "/mnt/usb", 128 * GB, 0, "vfat", VolumeKind::Removable, true),
-            raw("Scratch", "/mnt/scratch", 200 * GB, 50 * GB, "ext4", VolumeKind::Hdd, false),
-            raw("Big", "/mnt/archive", 4000 * GB, 500 * GB, "ext4", VolumeKind::Hdd, false),
+            raw(
+                "USB",
+                "/mnt/usb",
+                128 * GB,
+                0,
+                "vfat",
+                VolumeKind::Removable,
+                true,
+            ),
+            raw(
+                "Scratch",
+                "/mnt/scratch",
+                200 * GB,
+                50 * GB,
+                "ext4",
+                VolumeKind::Hdd,
+                false,
+            ),
+            raw(
+                "Big",
+                "/mnt/archive",
+                4000 * GB,
+                500 * GB,
+                "ext4",
+                VolumeKind::Hdd,
+                false,
+            ),
         ];
         let out = process(input, Platform::Linux);
         let primary = out.iter().find(|v| v.is_primary).unwrap();
@@ -304,8 +443,24 @@ mod tests {
     #[test]
     fn primary_falls_back_to_largest_removable_when_all_removable() {
         let input = vec![
-            raw("A", "/mnt/a", 32 * GB, 10 * GB, "vfat", VolumeKind::Removable, true),
-            raw("B", "/mnt/b", 128 * GB, 80 * GB, "vfat", VolumeKind::Removable, true),
+            raw(
+                "A",
+                "/mnt/a",
+                32 * GB,
+                10 * GB,
+                "vfat",
+                VolumeKind::Removable,
+                true,
+            ),
+            raw(
+                "B",
+                "/mnt/b",
+                128 * GB,
+                80 * GB,
+                "vfat",
+                VolumeKind::Removable,
+                true,
+            ),
         ];
         let out = process(input, Platform::Linux);
         let primary = out.iter().find(|v| v.is_primary).unwrap();
@@ -330,7 +485,15 @@ mod tests {
 
     #[test]
     fn used_bytes_saturating_when_free_exceeds_total() {
-        let input = vec![raw("/", "/", 100 * GB, 150 * GB, "ext4", VolumeKind::Ssd, false)];
+        let input = vec![raw(
+            "/",
+            "/",
+            100 * GB,
+            150 * GB,
+            "ext4",
+            VolumeKind::Ssd,
+            false,
+        )];
         let out = process(input, Platform::Linux);
         assert_eq!(out[0].used_bytes, 0, "no underflow");
         assert_eq!(out[0].free_bytes, 100 * GB, "free clamped to total");
@@ -338,7 +501,15 @@ mod tests {
 
     #[test]
     fn used_plus_free_equals_total_in_normal_case() {
-        let input = vec![raw("/", "/", 500 * GB, 123 * GB, "apfs", VolumeKind::Ssd, false)];
+        let input = vec![raw(
+            "/",
+            "/",
+            500 * GB,
+            123 * GB,
+            "apfs",
+            VolumeKind::Ssd,
+            false,
+        )];
         let out = process(input, Platform::Mac);
         assert_eq!(out[0].used_bytes + out[0].free_bytes, out[0].total_bytes);
     }
@@ -348,14 +519,48 @@ mod tests {
         // sysinfo gives device paths on linux, hostile to display.
         // we derive a label from the mount.
         let input = vec![
-            raw("/dev/nvme0n1p2", "/", 500 * GB, 200 * GB, "ext4", VolumeKind::Ssd, false),
-            raw("/dev/sda1", "/home", 2000 * GB, 1000 * GB, "ext4", VolumeKind::Hdd, false),
-            raw("/dev/nvme0n1p1", "/boot", GB, GB / 2, "vfat", VolumeKind::Ssd, false),
-            raw("/dev/sdb1", "/media/user/USB", 32 * GB, 20 * GB, "vfat", VolumeKind::Removable, true),
+            raw(
+                "/dev/nvme0n1p2",
+                "/",
+                500 * GB,
+                200 * GB,
+                "ext4",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "/dev/sda1",
+                "/home",
+                2000 * GB,
+                1000 * GB,
+                "ext4",
+                VolumeKind::Hdd,
+                false,
+            ),
+            raw(
+                "/dev/nvme0n1p1",
+                "/boot",
+                GB,
+                GB / 2,
+                "vfat",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "/dev/sdb1",
+                "/media/user/USB",
+                32 * GB,
+                20 * GB,
+                "vfat",
+                VolumeKind::Removable,
+                true,
+            ),
         ];
         let out = process(input, Platform::Linux);
-        let by_mount: std::collections::HashMap<_, _> =
-            out.iter().map(|v| (v.mount_point.clone(), v.name.clone())).collect();
+        let by_mount: std::collections::HashMap<_, _> = out
+            .iter()
+            .map(|v| (v.mount_point.clone(), v.name.clone()))
+            .collect();
         assert_eq!(by_mount["/"], "Root (/)");
         assert_eq!(by_mount["/home"], "Home (/home)");
         assert_eq!(by_mount["/boot"], "Boot (/boot)");
@@ -379,7 +584,15 @@ mod tests {
 
     #[test]
     fn mac_empty_label_falls_back_to_mount_point() {
-        let input = vec![raw("", "/", 100 * GB, 50 * GB, "apfs", VolumeKind::Ssd, false)];
+        let input = vec![raw(
+            "",
+            "/",
+            100 * GB,
+            50 * GB,
+            "apfs",
+            VolumeKind::Ssd,
+            false,
+        )];
         let out = process(input, Platform::Mac);
         assert_eq!(out[0].name, "/");
     }
@@ -403,8 +616,24 @@ mod tests {
     fn at_most_one_primary() {
         let input = vec![
             raw("/", "/", 500 * GB, 200 * GB, "apfs", VolumeKind::Ssd, false),
-            raw("Backup", "/Volumes/Backup", 2000 * GB, 1000 * GB, "apfs", VolumeKind::Hdd, false),
-            raw("Scratch", "/Volumes/Scratch", 1000 * GB, 500 * GB, "apfs", VolumeKind::Ssd, false),
+            raw(
+                "Backup",
+                "/Volumes/Backup",
+                2000 * GB,
+                1000 * GB,
+                "apfs",
+                VolumeKind::Hdd,
+                false,
+            ),
+            raw(
+                "Scratch",
+                "/Volumes/Scratch",
+                1000 * GB,
+                500 * GB,
+                "apfs",
+                VolumeKind::Ssd,
+                false,
+            ),
         ];
         let out = process(input, Platform::Mac);
         let primaries = out.iter().filter(|v| v.is_primary).count();
@@ -414,9 +643,33 @@ mod tests {
     #[test]
     fn sort_primary_first_then_size_desc() {
         let input = vec![
-            raw("Tiny", "/mnt/tiny", 10 * GB, 5 * GB, "ext4", VolumeKind::Ssd, false),
-            raw("Root", "/", 500 * GB, 100 * GB, "ext4", VolumeKind::Ssd, false),
-            raw("Huge", "/mnt/huge", 4000 * GB, 1000 * GB, "ext4", VolumeKind::Hdd, false),
+            raw(
+                "Tiny",
+                "/mnt/tiny",
+                10 * GB,
+                5 * GB,
+                "ext4",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "Root",
+                "/",
+                500 * GB,
+                100 * GB,
+                "ext4",
+                VolumeKind::Ssd,
+                false,
+            ),
+            raw(
+                "Huge",
+                "/mnt/huge",
+                4000 * GB,
+                1000 * GB,
+                "ext4",
+                VolumeKind::Hdd,
+                false,
+            ),
         ];
         let out = process(input, Platform::Linux);
         assert_eq!(out[0].mount_point, "/");
@@ -426,7 +679,15 @@ mod tests {
 
     #[test]
     fn serializes_as_camelcase_with_kebab_kind() {
-        let input = vec![raw("/", "/", 100 * GB, 50 * GB, "ext4", VolumeKind::Ssd, false)];
+        let input = vec![raw(
+            "/",
+            "/",
+            100 * GB,
+            50 * GB,
+            "ext4",
+            VolumeKind::Ssd,
+            false,
+        )];
         let out = process(input, Platform::Linux);
         let v = serde_json::to_value(&out[0]).unwrap();
         assert!(v.get("totalBytes").is_some());
@@ -458,7 +719,15 @@ mod tests {
             .collect();
         // bind-mount dupes of /mnt/d0
         for _ in 0..1000 {
-            input.push(raw("d0", "/mnt/d0", GB, GB / 2, "ext4", VolumeKind::Hdd, false));
+            input.push(raw(
+                "d0",
+                "/mnt/d0",
+                GB,
+                GB / 2,
+                "ext4",
+                VolumeKind::Hdd,
+                false,
+            ));
         }
         let out = process(input, Platform::Linux);
         assert_eq!(out.len(), 100);

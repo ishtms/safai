@@ -73,6 +73,15 @@ pub enum ScanPhase {
     Done,
 }
 
+impl ScanPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanPhase::Walking => "walking",
+            ScanPhase::Done => "done",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LargeOldHandle {
@@ -116,7 +125,10 @@ pub fn run_large_old_stream<E: LargeOldEmit>(
     // preflight. if root vanished between command and here, emit a done
     // with zeroed totals so UI resets instead of waiting forever.
     if std::fs::symlink_metadata(&root).is_err() {
-        emit.emit_done(&handle_id, &make_report(ScanPhase::Done, Vec::new(), 0, 0, 0));
+        emit.emit_done(
+            &handle_id,
+            &make_report(ScanPhase::Done, Vec::new(), 0, 0, 0),
+        );
         return;
     }
 
@@ -176,7 +188,20 @@ pub fn run_large_old_stream<E: LargeOldEmit>(
 /// process-wide registry. same shape as dupes / treemap.
 #[derive(Default)]
 pub struct LargeOldRegistry {
-    inner: Mutex<std::collections::HashMap<String, Arc<LargeOldController>>>,
+    inner: Mutex<std::collections::HashMap<String, LargeOldEntry>>,
+}
+
+#[derive(Clone)]
+struct LargeOldEntry {
+    ctrl: Arc<LargeOldController>,
+    handle: LargeOldHandle,
+    done: Option<LargeOldReport>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LargeOldInsert {
+    Inserted,
+    Active(LargeOldHandle),
 }
 
 impl LargeOldRegistry {
@@ -184,18 +209,61 @@ impl LargeOldRegistry {
         Self::default()
     }
 
-    pub fn insert(&self, id: String, ctrl: Arc<LargeOldController>) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.insert(id, ctrl);
+    pub fn insert_or_active(
+        &self,
+        handle: LargeOldHandle,
+        ctrl: Arc<LargeOldController>,
+    ) -> LargeOldInsert {
+        let mut g = self.inner.lock().expect("large-old registry poisoned");
+        if let Some(active) = g.values().find(|entry| entry.done.is_none()) {
+            return LargeOldInsert::Active(active.handle.clone());
         }
+        g.insert(
+            handle.id.clone(),
+            LargeOldEntry {
+                ctrl,
+                handle,
+                done: None,
+            },
+        );
+        LargeOldInsert::Inserted
+    }
+
+    pub fn active_handle(&self) -> Option<LargeOldHandle> {
+        self.inner.lock().ok().and_then(|g| {
+            g.values()
+                .find(|entry| entry.done.is_none())
+                .map(|e| e.handle.clone())
+        })
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<LargeOldController>> {
-        self.inner.lock().ok().and_then(|g| g.get(id).cloned())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).map(|e| e.ctrl.clone()))
     }
 
     pub fn remove(&self, id: &str) -> Option<Arc<LargeOldController>> {
-        self.inner.lock().ok().and_then(|mut g| g.remove(id))
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(id).map(|e| e.ctrl))
+    }
+
+    pub fn finish(&self, id: &str, report: LargeOldReport) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(entry) = g.get_mut(id) {
+                entry.done = Some(report);
+            }
+        }
+    }
+
+    pub fn terminal_snapshot(&self, id: &str) -> Option<LargeOldReport> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).and_then(|e| e.done.clone()))
     }
 
     #[cfg(test)]
@@ -278,7 +346,12 @@ mod tests {
     fn cancel_before_walk_yields_empty_done() {
         let tmp = tempfile::tempdir().unwrap();
         for i in 0..10 {
-            write_aged(tmp.path(), &format!("a{i}.bin"), &vec![0u8; 4096], 365 * 86400);
+            write_aged(
+                tmp.path(),
+                &format!("a{i}.bin"),
+                &vec![0u8; 4096],
+                365 * 86400,
+            );
         }
         let ctrl = Arc::new(LargeOldController::new());
         ctrl.cancel();
@@ -321,12 +394,85 @@ mod tests {
         let reg = LargeOldRegistry::new();
         let id = next_large_old_handle_id();
         let ctrl = Arc::new(LargeOldController::new());
-        reg.insert(id.clone(), ctrl.clone());
+        let handle = LargeOldHandle {
+            id: id.clone(),
+            root: "/tmp".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(handle, ctrl.clone()),
+            LargeOldInsert::Inserted
+        ));
         assert_eq!(reg.len(), 1);
         reg.get(&id).unwrap().cancel();
         assert!(ctrl.is_cancelled());
         assert!(reg.remove(&id).is_some());
         assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn registry_reuses_active_handle() {
+        let reg = LargeOldRegistry::new();
+        let first = LargeOldHandle {
+            id: "large-a".into(),
+            root: "/one".into(),
+        };
+        let second = LargeOldHandle {
+            id: "large-b".into(),
+            root: "/two".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(first.clone(), Arc::new(LargeOldController::new())),
+            LargeOldInsert::Inserted
+        ));
+        match reg.insert_or_active(second, Arc::new(LargeOldController::new())) {
+            LargeOldInsert::Active(active) => assert_eq!(active.id, first.id),
+            LargeOldInsert::Inserted => panic!("expected active handle reuse"),
+        }
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn terminal_snapshot_does_not_block_next_handle() {
+        let reg = LargeOldRegistry::new();
+        let first = LargeOldHandle {
+            id: "large-a".into(),
+            root: "/one".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(first.clone(), Arc::new(LargeOldController::new())),
+            LargeOldInsert::Inserted
+        ));
+        let report = LargeOldReport {
+            root: first.root.clone(),
+            files: Vec::new(),
+            total_matched: 0,
+            total_bytes: 0,
+            total_files_scanned: 1,
+            duration_ms: 1,
+            phase: ScanPhase::Done,
+            min_bytes: 1,
+            min_days_idle: 1,
+        };
+
+        reg.finish(&first.id, report.clone());
+
+        assert_eq!(
+            reg.terminal_snapshot(&first.id)
+                .unwrap()
+                .total_files_scanned,
+            report.total_files_scanned,
+        );
+        assert!(matches!(
+            reg.insert_or_active(
+                LargeOldHandle {
+                    id: "large-b".into(),
+                    root: "/two".into(),
+                },
+                Arc::new(LargeOldController::new()),
+            ),
+            LargeOldInsert::Inserted
+        ));
+        assert_eq!(reg.len(), 2);
     }
 
     #[test]

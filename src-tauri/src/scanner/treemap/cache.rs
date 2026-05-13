@@ -23,11 +23,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use super::tree::TreeNode;
-use super::{lay_out_children_of, TreemapResponse};
+use super::{lay_out_children_of, now_unix, TreemapResponse};
 
 /// memory scales with max_depth + tree fan-out. typical home scan = few hundred KB.
 struct CachedScan {
     tree: TreeNode,
+    scanned_at: u64,
     /// depth cap when built. kept so future heuristics (e.g. "only serve within
     /// N levels of cap") have context without a re-walk.
     #[allow(dead_code)]
@@ -50,7 +51,14 @@ impl TreemapCache {
     /// overwrites prior entry for the same root. rescan should replace stale data.
     pub fn store(&self, root: PathBuf, tree: TreeNode, max_depth: usize) {
         if let Ok(mut g) = self.inner.lock() {
-            g.insert(root, CachedScan { tree, max_depth });
+            g.insert(
+                root,
+                CachedScan {
+                    tree,
+                    scanned_at: now_unix(),
+                    max_depth,
+                },
+            );
         }
     }
 
@@ -109,6 +117,7 @@ impl TreemapCache {
             total_files: node.file_count,
             tiles,
             biggest,
+            scanned_at: scan.scanned_at,
             // cache hit is essentially instant, report 0 so UI doesn't claim a
             // 3s scan when it came from RAM.
             duration_ms: 0,

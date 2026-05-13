@@ -15,16 +15,19 @@
 //! reverse. no SDK, no Finder IPC, no platform surprises.
 //!
 //! atomicity: items move via fs::rename (same-device = atomic everywhere).
-//! cross-device fallback is copy-then-delete. if copy succeeds but delete
-//! fails, original stays put and we don't add it to committed, so the
-//! user's view stays consistent.
+//! cross-device fallback is allowed only after a destination free-space
+//! preflight succeeds. if copy succeeds but delete fails, original stays
+//! put and we don't add it to committed, so the user's view stays
+//! consistent.
 //!
-//! manifest is written AFTER all moves. crash mid-batch loses the partial
-//! manifest, but moved items sit in numbered slots and can be recovered by
-//! hand. rare enough that a WAL manifest isn't worth it.
+//! durability: a staging manifest is created before moves begin, each item
+//! is recorded before it is touched, and successful moves are marked as
+//! moved. the batch is atomically marked committed at the end. a crash
+//! mid-batch leaves enough information for restore/purge to find moved
+//! items without hand-recovering numbered slots.
 
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,6 +48,30 @@ pub struct ManifestEntry {
     pub bytes: u64,
     pub file_count: u64,
     pub kind: ItemKind,
+    #[serde(default = "default_entry_state")]
+    pub state: ManifestEntryState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManifestEntryState {
+    Pending,
+    Moved,
+}
+
+fn default_entry_state() -> ManifestEntryState {
+    ManifestEntryState::Moved
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BatchStatus {
+    Staging,
+    Committed,
+}
+
+fn default_batch_status() -> BatchStatus {
+    BatchStatus::Committed
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +79,8 @@ pub struct ManifestEntry {
 pub struct BatchManifest {
     pub batch_id: String,
     pub created_at: u64,
+    #[serde(default = "default_batch_status")]
+    pub status: BatchStatus,
     pub items: Vec<ManifestEntry>,
 }
 
@@ -64,7 +93,15 @@ pub fn commit(data_dir: &Path, plan: &DeletePlan) -> Result<DeleteResult, Cleane
     fs::create_dir_all(&items_dir)
         .map_err(|e| CleanerError::Io(format!("create graveyard: {e}")))?;
 
-    let mut entries: Vec<ManifestEntry> = Vec::new();
+    let mut manifest = BatchManifest {
+        batch_id: batch_id.clone(),
+        created_at: now_unix(),
+        status: BatchStatus::Staging,
+        items: Vec::new(),
+    };
+    let manifest_path = batch_dir.join("manifest.json");
+    write_manifest_atomic(&manifest_path, &manifest)?;
+
     let mut committed: Vec<String> = Vec::new();
     let mut failed: Vec<DeleteFailure> = Vec::new();
     let mut bytes_trashed: u64 = 0;
@@ -93,19 +130,47 @@ pub fn commit(data_dir: &Path, plan: &DeletePlan) -> Result<DeleteResult, Cleane
             .unwrap_or_else(|| std::ffi::OsString::from("item"));
         let moved = slot.join(&file_name);
 
-        match safe_move(&orig, &moved) {
+        let entry_index = manifest.items.len();
+        manifest.items.push(ManifestEntry {
+            orig_path: item.path.clone(),
+            moved_path: moved.to_string_lossy().into_owned(),
+            bytes: item.bytes,
+            file_count: item.file_count,
+            kind: item.kind,
+            state: ManifestEntryState::Pending,
+        });
+        if let Err(e) = write_manifest_atomic(&manifest_path, &manifest) {
+            manifest.items.pop();
+            failed.push(DeleteFailure {
+                path: item.path.clone(),
+                error: format!("stage manifest entry: {e}"),
+            });
+            let _ = fs::remove_dir_all(&slot);
+            continue;
+        }
+
+        match safe_move(&orig, &moved, item.bytes) {
             Ok(()) => {
                 bytes_trashed = bytes_trashed.saturating_add(item.bytes);
                 committed.push(item.path.clone());
-                entries.push(ManifestEntry {
-                    orig_path: item.path.clone(),
-                    moved_path: moved.to_string_lossy().into_owned(),
-                    bytes: item.bytes,
-                    file_count: item.file_count,
-                    kind: item.kind,
-                });
+                if let Some(entry) = manifest.items.get_mut(entry_index) {
+                    entry.state = ManifestEntryState::Moved;
+                }
+                if let Err(e) = write_manifest_atomic(&manifest_path, &manifest) {
+                    eprintln!(
+                        "[safai] graveyard manifest update failed after moving {}: {e}",
+                        item.path
+                    );
+                }
             }
             Err(e) => {
+                manifest.items.remove(entry_index);
+                if let Err(write_err) = write_manifest_atomic(&manifest_path, &manifest) {
+                    eprintln!(
+                        "[safai] graveyard manifest cleanup failed for {}: {write_err}",
+                        item.path
+                    );
+                }
                 failed.push(DeleteFailure {
                     path: item.path.clone(),
                     error: e,
@@ -116,16 +181,8 @@ pub fn commit(data_dir: &Path, plan: &DeletePlan) -> Result<DeleteResult, Cleane
         }
     }
 
-    let manifest = BatchManifest {
-        batch_id: batch_id.clone(),
-        created_at: now_unix(),
-        items: entries,
-    };
-    let manifest_path = batch_dir.join("manifest.json");
-    let encoded = serde_json::to_vec_pretty(&manifest)
-        .map_err(|e| CleanerError::Io(format!("encode manifest: {e}")))?;
-    fs::write(&manifest_path, encoded)
-        .map_err(|e| CleanerError::Io(format!("write manifest: {e}")))?;
+    manifest.status = BatchStatus::Committed;
+    write_manifest_atomic(&manifest_path, &manifest)?;
 
     Ok(DeleteResult {
         token: plan.token.clone(),
@@ -143,8 +200,8 @@ pub fn commit(data_dir: &Path, plan: &DeletePlan) -> Result<DeleteResult, Cleane
 pub fn restore_batch(data_dir: &Path, batch_id: &str) -> Result<RestoreResult, CleanerError> {
     let batch_dir = data_dir.join("graveyard").join(batch_id);
     let manifest_path = batch_dir.join("manifest.json");
-    let encoded = fs::read(&manifest_path)
-        .map_err(|e| CleanerError::Io(format!("read manifest: {e}")))?;
+    let encoded =
+        fs::read(&manifest_path).map_err(|e| CleanerError::Io(format!("read manifest: {e}")))?;
     let manifest: BatchManifest = serde_json::from_slice(&encoded)
         .map_err(|e| CleanerError::Audit(format!("parse manifest: {e}")))?;
 
@@ -156,7 +213,10 @@ pub fn restore_batch(data_dir: &Path, batch_id: &str) -> Result<RestoreResult, C
         let moved = PathBuf::from(&entry.moved_path);
         let orig = PathBuf::from(&entry.orig_path);
 
-        if !moved.exists() {
+        if fs::symlink_metadata(&moved).is_err() {
+            if entry.state == ManifestEntryState::Pending && orig.exists() {
+                continue;
+            }
             failed.push(DeleteFailure {
                 path: entry.orig_path.clone(),
                 error: "graveyard entry missing".into(),
@@ -180,7 +240,7 @@ pub fn restore_batch(data_dir: &Path, batch_id: &str) -> Result<RestoreResult, C
             }
         }
 
-        match safe_move(&moved, &orig) {
+        match safe_move(&moved, &orig, entry.bytes) {
             Ok(()) => {
                 restored.push(entry.orig_path.clone());
                 bytes_restored = bytes_restored.saturating_add(entry.bytes);
@@ -215,8 +275,11 @@ pub fn stats(data_dir: &Path) -> Result<GraveyardStats, CleanerError> {
     }
     let mut stats = GraveyardStats::default();
     for manifest in read_manifests(&grave)? {
+        let sum = manifest_bytes_on_disk(&manifest);
+        if manifest.status == BatchStatus::Staging && sum == 0 {
+            continue;
+        }
         stats.batch_count += 1;
-        let sum: u64 = manifest.items.iter().map(|i| i.bytes).sum();
         stats.total_bytes = stats.total_bytes.saturating_add(sum);
         stats.oldest_at = Some(match stats.oldest_at {
             None => manifest.created_at,
@@ -238,7 +301,9 @@ pub fn sweep_older_than(
     now: u64,
     ttl_secs: u64,
 ) -> Result<PurgeResult, CleanerError> {
-    sweep(data_dir, now, |m| now.saturating_sub(m.created_at) > ttl_secs)
+    sweep(data_dir, now, |m| {
+        now.saturating_sub(m.created_at) > ttl_secs
+    })
 }
 
 /// empty the graveyard. irreversible, UI must confirm first.
@@ -246,11 +311,7 @@ pub fn purge_all(data_dir: &Path) -> Result<PurgeResult, CleanerError> {
     sweep(data_dir, now_unix(), |_| true)
 }
 
-fn sweep<F>(
-    data_dir: &Path,
-    now: u64,
-    should_purge: F,
-) -> Result<PurgeResult, CleanerError>
+fn sweep<F>(data_dir: &Path, now: u64, should_purge: F) -> Result<PurgeResult, CleanerError>
 where
     F: Fn(&BatchManifest) -> bool,
 {
@@ -267,14 +328,13 @@ where
             continue;
         }
         let batch_dir = grave.join(&manifest.batch_id);
-        let batch_bytes: u64 = manifest.items.iter().map(|i| i.bytes).sum();
+        let batch_bytes = manifest_bytes_on_disk(&manifest);
         match fs::remove_dir_all(&batch_dir) {
             Ok(()) => {
                 result.purged.push(manifest.batch_id.clone());
                 result.bytes_freed = result.bytes_freed.saturating_add(batch_bytes);
                 // audit write failures don't abort, batch is gone anyway
-                let _ =
-                    audit::append_purge(data_dir, &manifest.batch_id, now, batch_bytes);
+                let _ = audit::append_purge(data_dir, &manifest.batch_id, now, batch_bytes);
             }
             Err(e) => result.failed.push(DeleteFailure {
                 path: batch_dir.to_string_lossy().into_owned(),
@@ -309,8 +369,90 @@ fn read_manifests(grave: &Path) -> Result<Vec<BatchManifest>, CleanerError> {
     Ok(out)
 }
 
-/// rename if same fs, copy+delete across devices.
-fn safe_move(src: &Path, dst: &Path) -> Result<(), String> {
+/// newest batch that still has payloads on disk. used as a recovery path
+/// when a crash happened before the audit log received its commit record.
+pub fn latest_restorable_batch(data_dir: &Path) -> Result<Option<String>, CleanerError> {
+    let grave = data_dir.join("graveyard");
+    if !grave.exists() {
+        return Ok(None);
+    }
+    let mut best: Option<BatchManifest> = None;
+    for manifest in read_manifests(&grave)? {
+        if !manifest.items.iter().any(entry_payload_exists) {
+            continue;
+        }
+        best = match best {
+            None => Some(manifest),
+            Some(cur)
+                if (manifest.created_at, manifest.batch_id.as_str())
+                    > (cur.created_at, cur.batch_id.as_str()) =>
+            {
+                Some(manifest)
+            }
+            Some(cur) => Some(cur),
+        };
+    }
+    Ok(best.map(|m| m.batch_id))
+}
+
+fn manifest_bytes_on_disk(manifest: &BatchManifest) -> u64 {
+    manifest
+        .items
+        .iter()
+        .filter(|entry| entry_payload_exists(entry))
+        .map(|entry| entry.bytes)
+        .sum()
+}
+
+fn entry_payload_exists(entry: &ManifestEntry) -> bool {
+    fs::symlink_metadata(Path::new(&entry.moved_path)).is_ok()
+}
+
+fn write_manifest_atomic(
+    manifest_path: &Path,
+    manifest: &BatchManifest,
+) -> Result<(), CleanerError> {
+    let dir = manifest_path
+        .parent()
+        .ok_or_else(|| CleanerError::Io("manifest path has no parent".into()))?;
+    fs::create_dir_all(dir).map_err(|e| CleanerError::Io(format!("create manifest dir: {e}")))?;
+    let encoded = serde_json::to_vec_pretty(manifest)
+        .map_err(|e| CleanerError::Io(format!("encode manifest: {e}")))?;
+    let seq = MANIFEST_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dir.join(format!(
+        ".manifest.json.tmp.{}.{}.{}",
+        std::process::id(),
+        now_nanos(),
+        seq
+    ));
+
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|e| CleanerError::Io(format!("open manifest tmp: {e}")))?;
+        f.write_all(&encoded)
+            .map_err(|e| CleanerError::Io(format!("write manifest tmp: {e}")))?;
+        f.sync_all()
+            .map_err(|e| CleanerError::Io(format!("sync manifest tmp: {e}")))?;
+    }
+
+    fs::rename(&tmp_path, manifest_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        CleanerError::Io(format!("rename manifest: {e}"))
+    })?;
+    sync_parent_dir(manifest_path)
+        .map_err(|e| CleanerError::Io(format!("sync manifest dir: {e}")))?;
+    Ok(())
+}
+
+static MANIFEST_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// rename if same fs, copy+delete across devices only after a destination
+/// free-space preflight. callers pass the previewed payload bytes so a
+/// cross-volume cleanup cannot blindly duplicate a large tree.
+fn safe_move(src: &Path, dst: &Path, bytes: u64) -> Result<(), String> {
     match fs::rename(src, dst) {
         Ok(()) => return Ok(()),
         Err(e) => {
@@ -321,9 +463,86 @@ fn safe_move(src: &Path, dst: &Path) -> Result<(), String> {
             }
         }
     }
+    preflight_cross_device_copy(dst, bytes)?;
     copy_recursive(src, dst).map_err(|e| format!("copy fallback: {e}"))?;
     remove_recursive(src).map_err(|e| format!("remove after copy: {e}"))?;
     Ok(())
+}
+
+fn preflight_cross_device_copy(dst: &Path, bytes: u64) -> Result<(), String> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let available = available_space_for_path(dst).ok_or_else(|| {
+        format!(
+            "cross-device move needs {bytes} bytes, but destination volume could not be resolved"
+        )
+    })?;
+    let required = bytes.saturating_add(cross_device_copy_margin(bytes));
+    if available < required {
+        return Err(format!(
+            "cross-device move needs {required} bytes available, destination has {available}"
+        ));
+    }
+    Ok(())
+}
+
+fn cross_device_copy_margin(bytes: u64) -> u64 {
+    const MIN_MARGIN: u64 = 16 * 1024 * 1024;
+    (bytes / 100).max(MIN_MARGIN)
+}
+
+fn available_space_for_path(path: &Path) -> Option<u64> {
+    use sysinfo::Disks;
+
+    let anchor = existing_ancestor(path)?;
+    let anchor = normalize_for_mount_match(&anchor);
+    let disks = Disks::new_with_refreshed_list();
+    let mut best: Option<(usize, u64)> = None;
+    for disk in disks.iter() {
+        let mount = normalize_for_mount_match(disk.mount_point());
+        if !anchor.starts_with(&mount) {
+            continue;
+        }
+        let score = mount.components().count() * 1024 + mount.to_string_lossy().len();
+        if best
+            .map(|(best_score, _)| score > best_score)
+            .unwrap_or(true)
+        {
+            best = Some((score, disk.available_space()));
+        }
+    }
+    best.map(|(_, available)| available)
+}
+
+fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cur = if path.exists() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    loop {
+        if cur.exists() {
+            return fs::canonicalize(&cur).ok().or(Some(cur));
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn normalize_for_mount_match(path: &Path) -> PathBuf {
+    PathBuf::from(
+        path.to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase(),
+    )
+}
+
+#[cfg(not(windows))]
+fn normalize_for_mount_match(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 /// EXDEV=18 on linux/mac, ERROR_NOT_SAME_DEVICE=17 on windows
@@ -357,11 +576,28 @@ fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
         }
         #[cfg(windows)]
         {
-            // win symlinks need privileges, fall back to fs::copy which
-            // usually errors with a clear message
-            fs::copy(src, dst)?;
+            use std::os::windows::fs::{symlink_dir, symlink_file, FileTypeExt};
+
+            let target = fs::read_link(src)?;
+            if ft.is_symlink_dir() {
+                symlink_dir(target, dst)?;
+            } else if ft.is_symlink_file() {
+                symlink_file(target, dst)?;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("unsupported windows symlink type: {}", src.display()),
+                ));
+            }
             return Ok(());
         }
+    }
+    #[cfg(windows)]
+    if is_windows_reparse_point(&meta) {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("unsupported windows reparse point: {}", src.display()),
+        ));
     }
     if ft.is_dir() {
         fs::create_dir_all(dst)?;
@@ -377,6 +613,13 @@ fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
         io::ErrorKind::Other,
         format!("unsupported file type: {}", src.display()),
     ))
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn remove_recursive(p: &Path) -> io::Result<()> {
@@ -403,6 +646,26 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -442,7 +705,10 @@ mod tests {
         let (_tmp, home, data) = fixture();
         let plan = build_plan(
             &home,
-            vec![home.join(".cache/spotify"), home.join(".cache/slack/session")],
+            vec![
+                home.join(".cache/spotify"),
+                home.join(".cache/slack/session"),
+            ],
         );
         let bytes_before = plan.total_bytes;
         let result = commit(&data, &plan).unwrap();
@@ -460,7 +726,12 @@ mod tests {
         assert!(batch_dir.join("manifest.json").exists());
         let m: BatchManifest =
             serde_json::from_slice(&fs::read(batch_dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(m.status, BatchStatus::Committed);
         assert_eq!(m.items.len(), 2);
+        assert!(m
+            .items
+            .iter()
+            .all(|entry| entry.state == ManifestEntryState::Moved));
     }
 
     #[test]
@@ -514,7 +785,10 @@ mod tests {
         let result = commit(&data, &plan).unwrap();
         assert_eq!(result.committed.len(), 1);
         // tree preserved inside the slot
-        let slot = data.join("graveyard").join(&result.batch_id).join("items/000000");
+        let slot = data
+            .join("graveyard")
+            .join(&result.batch_id)
+            .join("items/000000");
         assert!(slot.join("spotify/blob.bin").exists());
         assert!(slot.join("spotify/sub/other.bin").exists());
     }
@@ -557,6 +831,47 @@ mod tests {
         assert!(restored.failed[0].error.contains("now exists"));
         // partial-success contract, batch dir sticks around
         assert!(data.join("graveyard").join(&result.batch_id).exists());
+    }
+
+    #[test]
+    fn restore_recovers_staged_pending_payload_after_crash() {
+        let (_tmp, home, data) = fixture();
+        let batch_id = "b-crash";
+        let orig = home.join(".cache/slack/session");
+        let moved = data
+            .join("graveyard")
+            .join(batch_id)
+            .join("items/000000/session");
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::rename(&orig, &moved).unwrap();
+
+        let manifest = BatchManifest {
+            batch_id: batch_id.into(),
+            created_at: now_unix(),
+            status: BatchStatus::Staging,
+            items: vec![ManifestEntry {
+                orig_path: orig.to_string_lossy().into_owned(),
+                moved_path: moved.to_string_lossy().into_owned(),
+                bytes: 4096,
+                file_count: 1,
+                kind: ItemKind::File,
+                state: ManifestEntryState::Pending,
+            }],
+        };
+        write_manifest_atomic(
+            &data.join("graveyard").join(batch_id).join("manifest.json"),
+            &manifest,
+        )
+        .unwrap();
+
+        assert_eq!(
+            latest_restorable_batch(&data).unwrap(),
+            Some(batch_id.into())
+        );
+        let restored = restore_batch(&data, batch_id).unwrap();
+        assert_eq!(restored.failed.len(), 0);
+        assert_eq!(restored.restored.len(), 1);
+        assert!(orig.exists());
     }
 
     #[test]
@@ -622,7 +937,10 @@ mod tests {
         assert!(!link.exists());
         assert!(outside.exists());
         // slot holds a symlink, not a copy of the target
-        let slot = data.join("graveyard").join(&result.batch_id).join("items/000000/outside-link");
+        let slot = data
+            .join("graveyard")
+            .join(&result.batch_id)
+            .join("items/000000/outside-link");
         let m = fs::symlink_metadata(&slot).unwrap();
         assert!(m.file_type().is_symlink());
     }
@@ -688,7 +1006,11 @@ mod tests {
     #[test]
     fn purge_all_empties_the_graveyard() {
         let (_tmp, home, data) = fixture();
-        commit(&data, &build_plan(&home, vec![home.join(".cache/slack/session")])).unwrap();
+        commit(
+            &data,
+            &build_plan(&home, vec![home.join(".cache/slack/session")]),
+        )
+        .unwrap();
         commit(&data, &build_plan(&home, vec![home.join(".cache/spotify")])).unwrap();
 
         let r = purge_all(&data).unwrap();
@@ -705,7 +1027,11 @@ mod tests {
         let (_tmp, home, data) = fixture();
         // graveyard::commit doesn't touch the audit log, that's on the
         // Cleaner facade, so stage a commit record before purge
-        let r = commit(&data, &build_plan(&home, vec![home.join(".cache/slack/session")])).unwrap();
+        let r = commit(
+            &data,
+            &build_plan(&home, vec![home.join(".cache/slack/session")]),
+        )
+        .unwrap();
         audit::append_commit(&data, &r).unwrap();
         assert!(audit::latest_commit(&data).unwrap().is_some());
         purge_all(&data).unwrap();
@@ -721,7 +1047,10 @@ mod tests {
         let result = commit(&data, &plan).unwrap();
 
         // rewrite created_at to fake an old batch
-        let manifest_path = data.join("graveyard").join(&result.batch_id).join("manifest.json");
+        let manifest_path = data
+            .join("graveyard")
+            .join(&result.batch_id)
+            .join("manifest.json");
         let mut m: BatchManifest =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         m.created_at = 100;
@@ -766,7 +1095,11 @@ mod tests {
     #[test]
     fn purge_all_leaves_audit_log_readable() {
         let (_tmp, home, data) = fixture();
-        let r = commit(&data, &build_plan(&home, vec![home.join(".cache/slack/session")])).unwrap();
+        let r = commit(
+            &data,
+            &build_plan(&home, vec![home.join(".cache/slack/session")]),
+        )
+        .unwrap();
         audit::append_commit(&data, &r).unwrap();
         purge_all(&data).unwrap();
         let all = audit::read_all(&data).unwrap();

@@ -13,6 +13,8 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::scanner::fs_guard;
+
 use super::MAX_CANDIDATES_PER_BUCKET;
 
 /// head-pass byte count. 4 KB = one page everywhere, single readahead block
@@ -21,6 +23,11 @@ const HEAD_HASH_BYTES: usize = 4096;
 /// full-hash streaming buf. 64 KB balances syscall count vs cache pressure
 /// from parallel hashers
 const FULL_HASH_BUF: usize = 64 * 1024;
+
+/// files per progress tick while walking. duplicate progress events carry
+/// only counters until the terminal result, so this stays cheap even on
+/// large home directories.
+pub const PROGRESS_EVERY: u64 = 1_000;
 
 /// one file in a [`DuplicateGroup`]. absolute path, unix-seconds mtime.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -79,11 +86,13 @@ struct Candidate {
     modified: Option<u64>,
 }
 
-/// which pipeline phase just finished. streaming variant emits one
-/// progress event per phase.
+/// duplicate pipeline progress. streaming variant turns these into
+/// `dupes://progress` events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// walker done, count = total_files_scanned (post min-bytes filter)
+    /// walker is still running, counts are best-effort live totals
+    Walking,
+    /// walker done, with final walked-file and candidate counts
     WalkDone,
     /// size bucketing done, count = files still in play after dropping
     /// unique-size singletons
@@ -94,9 +103,13 @@ pub enum Phase {
     Done,
 }
 
-/// thread-safe per-phase callback. boxed dyn Fn so we don't monomorphise,
-/// fires 4 times per run so closure cost is noise anyway.
-pub type PhaseCallback<'a> = &'a (dyn Fn(Phase, u64) + Send + Sync);
+/// thread-safe progress callback. args are:
+/// `(phase, total_regular_files_walked, candidates_remaining_or_seen)`.
+///
+/// During `Walking` and `WalkDone`, the third value is the number of files
+/// that cleared the minimum-byte filter so far. During later phases it is
+/// the number of files still in play after pruning.
+pub type PhaseCallback<'a> = &'a (dyn Fn(Phase, u64, u64) + Send + Sync);
 
 /// run the pipeline. returns confirmed groups + total regular file count
 /// the walker saw.
@@ -130,10 +143,11 @@ pub fn find_duplicates_with_progress(
         }
     })?;
 
-    let candidates = collect_candidates(root, min_bytes, cancel.as_ref());
-    let files_scanned = candidates.len() as u64;
+    let (candidates, files_scanned) =
+        collect_candidates(root, min_bytes, cancel.as_ref(), on_phase);
+    let candidate_count = candidates.len() as u64;
     if let Some(cb) = on_phase {
-        cb(Phase::WalkDone, files_scanned);
+        cb(Phase::WalkDone, files_scanned, candidate_count);
     }
 
     if is_cancelled(cancel.as_ref()) {
@@ -149,7 +163,7 @@ pub fn find_duplicates_with_progress(
         .collect();
     let size_left: u64 = size_candidates.iter().map(|v| v.len() as u64).sum();
     if let Some(cb) = on_phase {
-        cb(Phase::SizeGrouped, size_left);
+        cb(Phase::SizeGrouped, files_scanned, size_left);
     }
 
     if is_cancelled(cancel.as_ref()) {
@@ -182,7 +196,7 @@ pub fn find_duplicates_with_progress(
         .collect();
     let full_left: u64 = candidates_for_full.iter().map(|v| v.len() as u64).sum();
     if let Some(cb) = on_phase {
-        cb(Phase::HeadHashed, full_left);
+        cb(Phase::HeadHashed, files_scanned, full_left);
     }
 
     if is_cancelled(cancel.as_ref()) {
@@ -245,7 +259,7 @@ pub fn find_duplicates_with_progress(
     });
 
     if let Some(cb) = on_phase {
-        cb(Phase::Done, groups.len() as u64);
+        cb(Phase::Done, files_scanned, groups.len() as u64);
     }
 
     Ok((groups, files_scanned))
@@ -262,23 +276,23 @@ pub fn find_duplicates_with_progress(
 /// collide with legit user folders, leave those for a user-tunable
 /// setting once lands.
 pub const IGNORED_DIR_NAMES: &[&str] = &[
-    "node_modules",   // npm / pnpm / yarn
-    ".git",           // git objects + packfiles
-    ".hg",            // mercurial
-    ".svn",           // subversion
-    ".bzr",           // bazaar
-    "Pods",           // CocoaPods (iOS)
-    "DerivedData",    // Xcode build intermediates
-    "__pycache__",    // python bytecode
-    ".venv",          // python virtualenv (PEP 405 conventional)
-    "venv",           // python virtualenv (older convention)
-    "vendor",         // composer / go modules / bundler
-    ".gradle",        // gradle daemon + wrapper cache
-    ".tox",           // tox test envs
-    "target",         // rust cargo / maven build dir
-    "Cellar",         // homebrew (macOS)
-    ".pnpm-store",    // pnpm content-addressed store
-    ".yarn",          // yarn PnP / cache
+    "node_modules", // npm / pnpm / yarn
+    ".git",         // git objects + packfiles
+    ".hg",          // mercurial
+    ".svn",         // subversion
+    ".bzr",         // bazaar
+    "Pods",         // CocoaPods (iOS)
+    "DerivedData",  // Xcode build intermediates
+    "__pycache__",  // python bytecode
+    ".venv",        // python virtualenv (PEP 405 conventional)
+    "venv",         // python virtualenv (older convention)
+    "vendor",       // composer / go modules / bundler
+    ".gradle",      // gradle daemon + wrapper cache
+    ".tox",         // tox test envs
+    "target",       // rust cargo / maven build dir
+    "Cellar",       // homebrew (macOS)
+    ".pnpm-store",  // pnpm content-addressed store
+    ".yarn",        // yarn PnP / cache
 ];
 
 /// walk root, return regular files >= min_bytes. skips symlinks,
@@ -288,31 +302,48 @@ fn collect_candidates(
     root: &Path,
     min_bytes: u64,
     cancel: Option<&Arc<AtomicBool>>,
-) -> Vec<Candidate> {
+    on_phase: Option<PhaseCallback<'_>>,
+) -> (Vec<Candidate>, u64) {
+    let root_dev = fs_guard::root_device_id(root);
     let walker = jwalk::WalkDir::new(root)
         .skip_hidden(false)
         .follow_links(false)
-        .process_read_dir(|_depth, _path, _state, children| {
+        .process_read_dir(move |_depth, _path, _state, children| {
             // drop children matching skip-list + their subtrees here.
             // doing it in process_read_dir prevents jwalk from ever
             // queueing the subtree, way faster than post-walk filter
             children.retain(|res| match res {
                 Ok(entry) => {
                     let name = entry.file_name();
-                    !IGNORED_DIR_NAMES
+                    if IGNORED_DIR_NAMES
                         .iter()
                         .any(|ignored| name == std::ffi::OsStr::new(ignored))
+                    {
+                        return false;
+                    }
+                    match entry.metadata() {
+                        Ok(meta) => fs_guard::is_on_root_device(root_dev, &meta),
+                        Err(_) => true,
+                    }
                 }
                 Err(_) => true, // let outer loop surface the error
             });
         });
 
-    let mut seen_inodes: std::collections::HashSet<(u64, u64)> =
-        std::collections::HashSet::new();
+    let mut seen_inodes: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
     // touch seen_inodes on non-unix to keep the borrow checker happy
     // when inode_key_from always returns None (windows)
     let _ = &mut seen_inodes;
     let mut out: Vec<Candidate> = Vec::new();
+    let mut files_scanned: u64 = 0;
+
+    let maybe_emit_walk = |files_scanned: u64, candidates_seen: usize| {
+        if files_scanned == 1 || files_scanned % PROGRESS_EVERY == 0 {
+            if let Some(cb) = on_phase {
+                cb(Phase::Walking, files_scanned, candidates_seen as u64);
+            }
+        }
+    };
 
     for entry in walker {
         if is_cancelled(cancel) {
@@ -323,18 +354,24 @@ fn collect_candidates(
         if ft.is_symlink() || !ft.is_file() {
             continue;
         }
+        files_scanned = files_scanned.saturating_add(1);
         let path = entry.path();
         // sparse container files (Docker.raw etc) would otherwise look
         // like dupes by logical size. skip them.
         if super::super::meta_ext::is_sparse_container_path(&path) {
+            maybe_emit_walk(files_scanned, out.len());
             continue;
         }
         let meta = match entry.metadata() {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(_) => {
+                maybe_emit_walk(files_scanned, out.len());
+                continue;
+            }
         };
         let size = super::super::meta_ext::allocated_bytes(&meta);
         if size < min_bytes {
+            maybe_emit_walk(files_scanned, out.len());
             continue;
         }
         let modified = meta
@@ -345,6 +382,7 @@ fn collect_candidates(
         // hardlink dedup: keep one path per inode
         if let Some(k) = inode_key_from(&meta) {
             if !seen_inodes.insert(k) {
+                maybe_emit_walk(files_scanned, out.len());
                 continue;
             }
         }
@@ -353,24 +391,28 @@ fn collect_candidates(
             size,
             modified,
         });
+        maybe_emit_walk(files_scanned, out.len());
     }
 
-    out
+    (out, files_scanned)
 }
 
-#[cfg(unix)]
 fn inode_key_from(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    Some((meta.dev(), meta.ino()))
-}
-
-#[cfg(not(unix))]
-fn inode_key_from(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
-    // windows would need GetFileInformationByHandle (volume serial +
-    // file index). out of scope for fallback None means
-    // hardlinks on windows surface as dupes. graveyard restore makes
-    // this surprising-but-safe rather than destructive.
-    None
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return Some((meta.dev(), meta.ino()));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return Some((meta.volume_serial_number()? as u64, meta.file_index()?));
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 fn bucket_by<T, K: std::hash::Hash + Eq>(
@@ -502,8 +544,10 @@ mod tests {
 
     #[test]
     fn hex32_round_trip() {
-        let h = [0u8, 1, 2, 15, 16, 255, 254, 16, 0, 0, 0, 0, 0, 0, 0, 0,
-                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let h = [
+            0u8, 1, 2, 15, 16, 255, 254, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
+        ];
         let s = hex32(&h);
         assert!(s.starts_with("0001020f10fffe10"));
         assert_eq!(s.len(), 64);

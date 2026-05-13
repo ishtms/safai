@@ -4,11 +4,13 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
 } from "solid-js";
 import { SafaiToolbar } from "../components/SafaiToolbar";
 import { Suds } from "../components/Suds";
 import { Icon, type IconName } from "../components/Icon";
+import { CacheFreshness } from "../components/CacheFreshness";
 import {
   BOOT_SECONDS_PER_IMPACT,
   estimateBootSeconds,
@@ -23,18 +25,20 @@ import {
   type StartupSource,
 } from "../lib/startup";
 import { formatCount, formatRelativeTime, truncateMiddle } from "../lib/format";
-import { KEY_STARTUP, sharedResource } from "../lib/scanCache";
+import { CACHE_STARTUP, sharedResource } from "../lib/scanCache";
 
 // startup items manager. login-time autostarts grouped by source w/ a
 // toggle each. hero shows before/after boot-time from per-item impact
 // tiers. flipping a switch live-previews "after" before the toggle
 // commits, so users can audit.
 export default function Startup() {
-  const [report, { refetch }] = sharedResource(KEY_STARTUP, startupScan);
+  const [report, { refetch }] = sharedResource(CACHE_STARTUP, startupScan);
 
   const [clock, setClock] = createSignal(Date.now());
-  const tick = setInterval(() => setClock(Date.now()), 500);
-  onCleanup(() => clearInterval(tick));
+  onMount(() => {
+    const tick = window.setInterval(() => setClock(Date.now()), 500);
+    onCleanup(() => window.clearInterval(tick));
+  });
 
   // optimistic overrides, set on toggle + cleared when refetch reflects the
   // new state. lets "after" update instantly
@@ -238,6 +242,13 @@ export default function Startup() {
                   <span>{formatCount(r().items.length)} items catalogued</span>
                   <span>·</span>
                   <span>Platform: {r().platform}</span>
+                  <span>·</span>
+                  <CacheFreshness
+                    cacheKey={CACHE_STARTUP}
+                    version={r()}
+                    disabled={report.loading}
+                    onRescan={() => refetch()}
+                  />
                 </div>
               )}
             </Show>

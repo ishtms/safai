@@ -75,11 +75,10 @@ pub fn append_purge(
 }
 
 fn append(data_dir: &Path, record: &AuditRecord) -> Result<(), CleanerError> {
-    fs::create_dir_all(data_dir)
-        .map_err(|e| CleanerError::Io(format!("create data dir: {e}")))?;
+    fs::create_dir_all(data_dir).map_err(|e| CleanerError::Io(format!("create data dir: {e}")))?;
     let path = data_dir.join("audit.log");
-    let line = serde_json::to_string(record)
-        .map_err(|e| CleanerError::Audit(format!("encode: {e}")))?;
+    let line =
+        serde_json::to_string(record).map_err(|e| CleanerError::Audit(format!("encode: {e}")))?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -113,8 +112,8 @@ pub fn read_all(data_dir: &Path) -> Result<Vec<AuditRecord>, CleanerError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let s = fs::read_to_string(&path)
-        .map_err(|e| CleanerError::Io(format!("read audit log: {e}")))?;
+    let s =
+        fs::read_to_string(&path).map_err(|e| CleanerError::Io(format!("read audit log: {e}")))?;
     let mut out = Vec::new();
     for line in s.lines() {
         let trimmed = line.trim();

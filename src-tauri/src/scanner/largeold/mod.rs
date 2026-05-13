@@ -40,7 +40,7 @@ use serde::Serialize;
 pub use pipeline::{find_large_old, FileSummary, FindError};
 pub use stream::{
     next_large_old_handle_id, run_large_old_stream, LargeOldController, LargeOldEmit,
-    LargeOldHandle, LargeOldRegistry, ScanPhase,
+    LargeOldHandle, LargeOldInsert, LargeOldRegistry, ScanPhase,
 };
 
 /// default min file size. 50 MiB catches mid-sized VM disks, big Logic
@@ -211,8 +211,7 @@ mod tests {
     #[test]
     fn missing_root_returns_not_found() {
         let err =
-            scan_large_old(Path::new("/definitely/not/here/safai-lo-xyz"), 0, 0, 1000)
-                .unwrap_err();
+            scan_large_old(Path::new("/definitely/not/here/safai-lo-xyz"), 0, 0, 1000).unwrap_err();
         assert!(matches!(err, FindError::NotFound(_)));
     }
 
@@ -273,12 +272,7 @@ mod tests {
     fn idle_days_calculation_is_rounded_down() {
         // 2.5d aging -> idle_days = 2
         let tmp = tempfile::tempdir().unwrap();
-        write_aged(
-            tmp.path(),
-            "a.bin",
-            &vec![0u8; 4096],
-            (2 * 86400) + 43_200,
-        );
+        write_aged(tmp.path(), "a.bin", &vec![0u8; 4096], (2 * 86400) + 43_200);
         let report = scan_large_old(tmp.path(), 1024, 1, 1000).unwrap();
         assert_eq!(report.files.len(), 1);
         assert_eq!(report.files[0].idle_days, 2);

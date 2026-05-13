@@ -20,7 +20,9 @@
 //!
 //! frontend filters by handleId so concurrent scans stay on their own lanes
 
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,6 +30,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use super::classify::{classify, should_sample_scan, Verdict};
+use super::fs_guard;
 
 // ---------- scan roots ----------
 
@@ -49,10 +52,16 @@ pub struct ScanRoot {
 
 impl ScanRoot {
     pub fn user(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), kind: RootKind::User }
+        Self {
+            path: path.into(),
+            kind: RootKind::User,
+        }
     }
     pub fn system(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), kind: RootKind::System }
+        Self {
+            path: path.into(),
+            kind: RootKind::System,
+        }
     }
 }
 
@@ -81,6 +90,15 @@ pub enum ScanState {
 }
 
 impl ScanState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanState::Running => "running",
+            ScanState::Paused => "paused",
+            ScanState::Cancelled => "cancelled",
+            ScanState::Done => "done",
+        }
+    }
+
     fn from_u8(v: u8) -> Self {
         match v {
             0 => ScanState::Running,
@@ -153,8 +171,10 @@ impl ScanController {
 
     /// set once by start_scan before spawning the walker thread
     pub fn set_volume_snapshot(&self, snap: VolumeSnapshot) {
-        self.volume_used_bytes.store(snap.used_bytes, Ordering::Relaxed);
-        self.volume_total_bytes.store(snap.total_bytes, Ordering::Relaxed);
+        self.volume_used_bytes
+            .store(snap.used_bytes, Ordering::Relaxed);
+        self.volume_total_bytes
+            .store(snap.total_bytes, Ordering::Relaxed);
     }
 
     #[allow(dead_code)] // paired with set_volume_snapshot for symmetry, snapshot() already exposes these fields
@@ -289,9 +309,9 @@ pub struct ScanProgress {
 /// methods take &self and must be Sync, walker hands the emitter to rayon workers
 pub trait Emit: Send + Sync {
     fn emit_event(&self, ev: &ScanEvent);
-    fn emit_progress(&self, p: &ScanProgress);
+    fn emit_progress(&self, handle_id: &str, p: &ScanProgress);
     /// called exactly once per scan after walker exits
-    fn emit_done(&self, p: &ScanProgress);
+    fn emit_done(&self, handle_id: &str, p: &ScanProgress);
 }
 
 // ---------- walker ----------
@@ -316,19 +336,14 @@ pub fn run_scan<E: Emit>(
     // cancelled scan reports final state as Cancelled
     ctrl.set_state(ScanState::Done);
     let snap = ctrl.snapshot();
-    emit.emit_done(&snap);
+    emit.emit_done(&handle_id, &snap);
 }
 
-fn walk_one<E: Emit>(
-    handle_id: &str,
-    root: &ScanRoot,
-    ctrl: Arc<ScanController>,
-    emit: Arc<E>,
-) {
+fn walk_one<E: Emit>(handle_id: &str, root: &ScanRoot, ctrl: Arc<ScanController>, emit: Arc<E>) {
     // capture root's device id for cross-device guard. if the root doesn't
     // exist (bare sandbox / unit test for missing path), root_dev stays
     // None and we don't filter, jwalk will just emit zero entries.
-    let root_dev = root_device_id(&root.path);
+    let root_dev = fs_guard::root_device_id(&root.path);
     let kind = root.kind;
 
     let walker = jwalk::WalkDir::new(&root.path)
@@ -364,7 +379,7 @@ fn walk_one<E: Emit>(
                     children.retain(|child_res| {
                         let Ok(child) = child_res else { return true };
                         match child.metadata() {
-                            Ok(md) => entry_device_id(&md) == Some(dev),
+                            Ok(md) => fs_guard::is_on_root_device(Some(dev), &md),
                             // can't stat -> keep, walker will skip later
                             Err(_) => true,
                         }
@@ -462,37 +477,9 @@ fn handle_entry<E: Emit>(
             *last = now;
             drop(last);
             let snap = ctrl.snapshot();
-            emit.emit_progress(&snap);
+            emit.emit_progress(handle_id, &snap);
         }
     }
-}
-
-/// device id for the root path. unix: st_dev. windows: not implemented
-/// (different drive letters are naturally different roots). None when
-/// the path can't be stat'd - treated as "no guard" so missing paths
-/// walk as before.
-fn root_device_id(path: &Path) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(path).ok().map(|m| m.dev())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
-}
-
-#[cfg(unix)]
-fn entry_device_id(md: &std::fs::Metadata) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    Some(md.dev())
-}
-
-#[cfg(not(unix))]
-fn entry_device_id(_md: &std::fs::Metadata) -> Option<u64> {
-    None
 }
 
 // ---------- registry (id -> controller) ----------
@@ -500,7 +487,20 @@ fn entry_device_id(_md: &std::fs::Metadata) -> Option<u64> {
 /// wrapped so commands.rs can `Manage` it in tauri
 #[derive(Default)]
 pub struct ScanRegistry {
-    inner: Mutex<std::collections::HashMap<String, Arc<ScanController>>>,
+    inner: Mutex<std::collections::HashMap<String, ScanEntry>>,
+}
+
+#[derive(Clone)]
+struct ScanEntry {
+    ctrl: Arc<ScanController>,
+    roots: Vec<String>,
+    completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanInsert {
+    Inserted,
+    Active { id: String, roots: Vec<String> },
 }
 
 impl ScanRegistry {
@@ -508,18 +508,50 @@ impl ScanRegistry {
         Self::default()
     }
 
-    pub fn insert(&self, id: String, ctrl: Arc<ScanController>) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.insert(id, ctrl);
+    pub fn insert_or_active(
+        &self,
+        id: String,
+        ctrl: Arc<ScanController>,
+        roots: Vec<String>,
+    ) -> ScanInsert {
+        let mut g = self.inner.lock().expect("scan registry poisoned");
+        if let Some((active_id, active)) = g.iter().find(|(_, entry)| !entry.completed) {
+            return ScanInsert::Active {
+                id: active_id.clone(),
+                roots: active.roots.clone(),
+            };
         }
+        g.insert(
+            id,
+            ScanEntry {
+                ctrl,
+                roots,
+                completed: false,
+            },
+        );
+        ScanInsert::Inserted
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<ScanController>> {
-        self.inner.lock().ok().and_then(|g| g.get(id).cloned())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).map(|e| e.ctrl.clone()))
     }
 
     pub fn remove(&self, id: &str) -> Option<Arc<ScanController>> {
-        self.inner.lock().ok().and_then(|mut g| g.remove(id))
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(id).map(|e| e.ctrl))
+    }
+
+    pub fn finish(&self, id: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(entry) = g.get_mut(id) {
+                entry.completed = true;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -577,7 +609,10 @@ mod tests {
         let c = ScanController::new();
         std::thread::sleep(Duration::from_millis(80));
         let before_pause = c.active_elapsed_ms();
-        assert!(before_pause >= 60, "expected some elapsed, got {before_pause}");
+        assert!(
+            before_pause >= 60,
+            "expected some elapsed, got {before_pause}"
+        );
 
         c.set_state(ScanState::Paused);
         let at_pause = c.active_elapsed_ms();
@@ -662,7 +697,10 @@ mod tests {
         assert_eq!(ctrl.state(), ScanState::Done);
         let snap = ctrl.snapshot();
         assert_eq!(snap.files_scanned, files.len() as u64);
-        assert_eq!(snap.bytes_scanned, files.iter().map(|(_, n)| *n as u64).sum::<u64>());
+        assert_eq!(
+            snap.bytes_scanned,
+            files.iter().map(|(_, n)| *n as u64).sum::<u64>()
+        );
     }
 
     #[test]
@@ -715,7 +753,8 @@ mod tests {
         // stays fast on any fs
         let big = tmp.path().join("big.bin");
         let f = fs::File::create(&big).unwrap();
-        f.set_len(super::super::classify::FOUND_MIN_BYTES + 1024).unwrap();
+        f.set_len(super::super::classify::FOUND_MIN_BYTES + 1024)
+            .unwrap();
         make_tree(tmp.path(), &[("small1.txt", 10), ("small2.txt", 20)]);
 
         let ctrl = Arc::new(ScanController::new());
@@ -750,10 +789,10 @@ mod tests {
         fn emit_event(&self, ev: &ScanEvent) {
             self.0.events.lock().unwrap().push(ev.clone());
         }
-        fn emit_progress(&self, p: &ScanProgress) {
+        fn emit_progress(&self, _handle_id: &str, p: &ScanProgress) {
             self.0.progress.lock().unwrap().push(p.clone());
         }
-        fn emit_done(&self, p: &ScanProgress) {
+        fn emit_done(&self, _handle_id: &str, p: &ScanProgress) {
             *self.0.done.lock().unwrap() = Some(p.clone());
         }
     }
@@ -767,7 +806,8 @@ mod tests {
         let cached = cache_dir.join("blob.bin");
         let f = fs::File::create(&cached).unwrap();
         // big, to prove Safe wins over Found
-        f.set_len(super::super::classify::FOUND_MIN_BYTES + 1).unwrap();
+        f.set_len(super::super::classify::FOUND_MIN_BYTES + 1)
+            .unwrap();
 
         let ctrl = Arc::new(ScanController::new());
         let rec = Arc::new(ArcRecorder::default());
@@ -779,8 +819,14 @@ mod tests {
         );
 
         let events = rec.events.lock().unwrap();
-        let safe = events.iter().filter(|e| matches!(e.kind, ScanEventKind::Safe)).count();
-        let found = events.iter().filter(|e| matches!(e.kind, ScanEventKind::Found)).count();
+        let safe = events
+            .iter()
+            .filter(|e| matches!(e.kind, ScanEventKind::Safe))
+            .count();
+        let found = events
+            .iter()
+            .filter(|e| matches!(e.kind, ScanEventKind::Found))
+            .count();
         assert_eq!(safe, 1);
         assert_eq!(found, 0);
     }
@@ -827,7 +873,8 @@ mod tests {
         let emitted = rec.progress.lock().unwrap().len();
         // upper bound: snapshot per throttle window + slack for parallel
         // workers racing try_lock. 4x to stay non-flaky
-        let max_expected = (elapsed.as_millis() / PROGRESS_THROTTLE.as_millis()).max(1) as usize * 4 + 4;
+        let max_expected =
+            (elapsed.as_millis() / PROGRESS_THROTTLE.as_millis()).max(1) as usize * 4 + 4;
         assert!(
             emitted <= max_expected,
             "throttle violated: {emitted} progress events in {:?} (cap {max_expected})",
@@ -840,7 +887,10 @@ mod tests {
         let reg = ScanRegistry::new();
         let id = next_handle_id();
         let ctrl = Arc::new(ScanController::new());
-        reg.insert(id.clone(), ctrl.clone());
+        assert_eq!(
+            reg.insert_or_active(id.clone(), ctrl.clone(), vec!["/tmp".into()]),
+            ScanInsert::Inserted
+        );
         assert_eq!(reg.len(), 1);
         let got = reg.get(&id).expect("present");
         got.set_state(ScanState::Cancelled);
@@ -848,6 +898,49 @@ mod tests {
         assert!(reg.remove(&id).is_some());
         assert_eq!(reg.len(), 0);
         assert!(reg.get(&id).is_none());
+    }
+
+    #[test]
+    fn registry_reuses_active_handle() {
+        let reg = ScanRegistry::new();
+        let first_id = "first".to_string();
+        let first = Arc::new(ScanController::new());
+        assert_eq!(
+            reg.insert_or_active(first_id.clone(), first.clone(), vec!["/one".into()]),
+            ScanInsert::Inserted
+        );
+
+        let second = Arc::new(ScanController::new());
+        assert_eq!(
+            reg.insert_or_active("second".into(), second, vec!["/two".into()]),
+            ScanInsert::Active {
+                id: first_id,
+                roots: vec!["/one".into()],
+            }
+        );
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn completed_registry_entry_does_not_block_next_scan() {
+        let reg = ScanRegistry::new();
+        let first = Arc::new(ScanController::new());
+        assert_eq!(
+            reg.insert_or_active("first".into(), first, vec!["/one".into()]),
+            ScanInsert::Inserted
+        );
+
+        reg.finish("first");
+
+        let second = Arc::new(ScanController::new());
+        assert_eq!(
+            reg.insert_or_active("second".into(), second, vec!["/two".into()]),
+            ScanInsert::Inserted
+        );
+        assert_eq!(reg.len(), 2);
+        assert!(reg.get("first").is_some());
+        assert!(reg.remove("first").is_some());
+        assert_eq!(reg.len(), 1);
     }
 
     #[test]
@@ -882,7 +975,9 @@ mod tests {
         let rec = Arc::new(ArcRecorder::default());
         run_scan(
             "h-bad".into(),
-            vec![ScanRoot::user(PathBuf::from("/definitely/does/not/exist/safai-test-root-xyz"))],
+            vec![ScanRoot::user(PathBuf::from(
+                "/definitely/does/not/exist/safai-test-root-xyz",
+            ))],
             ctrl.clone(),
             ArcEmit(rec.clone()),
         );

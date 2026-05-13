@@ -245,7 +245,10 @@ mod tests {
         for (src, want) in [
             (StartupSource::LinuxAutostart, "linux-autostart"),
             (StartupSource::MacLaunchAgentUser, "mac-launch-agent-user"),
-            (StartupSource::WindowsStartupFolder, "windows-startup-folder"),
+            (
+                StartupSource::WindowsStartupFolder,
+                "windows-startup-folder",
+            ),
         ] {
             assert_eq!(src.slug(), want);
             let json = serde_json::to_string(&src).unwrap();
@@ -281,7 +284,10 @@ mod tests {
 
     #[test]
     fn impact_classifier_flags_heavy_apps() {
-        assert_eq!(impact_for_command("/Applications/Docker.app/…"), StartupImpact::High);
+        assert_eq!(
+            impact_for_command("/Applications/Docker.app/…"),
+            StartupImpact::High
+        );
         assert_eq!(impact_for_command("/opt/Slack/slack"), StartupImpact::High);
         assert_eq!(
             impact_for_command("/usr/share/code/Code Helper"),
@@ -309,7 +315,10 @@ mod tests {
     fn impact_classifier_defaults_to_low() {
         assert_eq!(impact_for_command("/usr/bin/true"), StartupImpact::Low);
         assert_eq!(impact_for_command(""), StartupImpact::Low);
-        assert_eq!(impact_for_command("some random shell script"), StartupImpact::Low);
+        assert_eq!(
+            impact_for_command("some random shell script"),
+            StartupImpact::Low
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub struct ActivityController {
     cancel_flag: AtomicBool,
     interval_ms: AtomicU64,
     started: Instant,
+    latest_snapshot: Mutex<Option<ActivitySnapshot>>,
     /// lock/condvar for interruptible sleep. `()` payload is a sentinel, we
     /// only ever notify, never store state
     wait: Arc<(Mutex<()>, Condvar)>,
@@ -53,6 +54,7 @@ impl ActivityController {
             cancel_flag: AtomicBool::new(false),
             interval_ms: AtomicU64::new(DEFAULT_INTERVAL_MS),
             started: Instant::now(),
+            latest_snapshot: Mutex::new(None),
             wait: Arc::new((Mutex::new(()), Condvar::new())),
             tick: AtomicU64::new(0),
         }
@@ -97,6 +99,19 @@ impl ActivityController {
         self.tick.load(Ordering::Acquire)
     }
 
+    pub fn store_snapshot(&self, snap: ActivitySnapshot) {
+        if let Ok(mut latest) = self.latest_snapshot.lock() {
+            *latest = Some(snap);
+        }
+    }
+
+    pub fn latest_snapshot(&self) -> Option<ActivitySnapshot> {
+        self.latest_snapshot
+            .lock()
+            .ok()
+            .and_then(|latest| latest.clone())
+    }
+
     /// returns early on cancel or interval change
     pub fn sleep_cancellable(&self, dur: Duration) {
         let (lock, cv) = &*self.wait;
@@ -136,11 +151,14 @@ pub fn run_activity_stream<P: SystemProbe, E: ActivityEmit>(
     // a throwaway refresh + short pause so the first emit has real numbers
     // instead of all-zero
     probe.refresh();
-    std::thread::sleep(Duration::from_millis(MIN_INTERVAL_MS.min(ctrl.interval_ms())));
+    std::thread::sleep(Duration::from_millis(
+        MIN_INTERVAL_MS.min(ctrl.interval_ms()),
+    ));
 
     while !ctrl.is_cancelled() {
         let tick = ctrl.tick.fetch_add(1, Ordering::AcqRel);
         let snap = sample::sample(&mut probe, top_n, tick);
+        ctrl.store_snapshot(snap.clone());
         emit.emit_snapshot(&handle_id, &snap);
         if ctrl.is_cancelled() {
             break;
@@ -151,7 +169,19 @@ pub fn run_activity_stream<P: SystemProbe, E: ActivityEmit>(
 
 #[derive(Default)]
 pub struct ActivityRegistry {
-    inner: Mutex<HashMap<String, Arc<ActivityController>>>,
+    inner: Mutex<HashMap<String, ActivityEntry>>,
+}
+
+#[derive(Clone)]
+struct ActivityEntry {
+    ctrl: Arc<ActivityController>,
+    handle: ActivityHandle,
+}
+
+#[derive(Debug, Clone)]
+pub enum ActivityInsert {
+    Inserted,
+    Active(ActivityHandle),
 }
 
 impl ActivityRegistry {
@@ -159,18 +189,38 @@ impl ActivityRegistry {
         Self::default()
     }
 
-    pub fn insert(&self, id: String, ctrl: Arc<ActivityController>) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.insert(id, ctrl);
+    pub fn insert_or_active(
+        &self,
+        handle: ActivityHandle,
+        ctrl: Arc<ActivityController>,
+    ) -> ActivityInsert {
+        let mut g = self.inner.lock().expect("activity registry poisoned");
+        if let Some(active) = g.values().next() {
+            return ActivityInsert::Active(active.handle.clone());
         }
+        g.insert(handle.id.clone(), ActivityEntry { ctrl, handle });
+        ActivityInsert::Inserted
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<ActivityController>> {
-        self.inner.lock().ok().and_then(|g| g.get(id).cloned())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).map(|e| e.ctrl.clone()))
+    }
+
+    pub fn latest_snapshot(&self) -> Option<ActivitySnapshot> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.values().find_map(|e| e.ctrl.latest_snapshot()))
     }
 
     pub fn remove(&self, id: &str) -> Option<Arc<ActivityController>> {
-        self.inner.lock().ok().and_then(|mut g| g.remove(id))
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(id).map(|e| e.ctrl))
     }
 
     /// called from the process-exit hook so we don't leak sampler threads
@@ -179,7 +229,7 @@ impl ActivityRegistry {
     pub fn cancel_all(&self) {
         if let Ok(g) = self.inner.lock() {
             for ctrl in g.values() {
-                ctrl.cancel();
+                ctrl.ctrl.cancel();
             }
         }
     }
@@ -400,7 +450,11 @@ mod tests {
         ctrl.cancel();
         handle.join().unwrap();
         let events = rec.events.lock().unwrap();
-        assert!(events.len() >= 2, "need multiple ticks, got {}", events.len());
+        assert!(
+            events.len() >= 2,
+            "need multiple ticks, got {}",
+            events.len()
+        );
         for w in events.windows(2) {
             assert!(
                 w[1].tick > w[0].tick,
@@ -451,7 +505,14 @@ mod tests {
         let reg = ActivityRegistry::new();
         let id = next_activity_handle_id();
         let ctrl = Arc::new(ActivityController::new());
-        reg.insert(id.clone(), ctrl.clone());
+        let handle = ActivityHandle {
+            id: id.clone(),
+            interval_ms: DEFAULT_INTERVAL_MS,
+        };
+        assert!(matches!(
+            reg.insert_or_active(handle, ctrl.clone()),
+            ActivityInsert::Inserted
+        ));
         assert_eq!(reg.len(), 1);
         reg.get(&id).unwrap().cancel();
         assert!(ctrl.is_cancelled());
@@ -460,15 +521,33 @@ mod tests {
     }
 
     #[test]
-    fn registry_cancel_all_covers_every_stream() {
+    fn registry_reuses_active_handle() {
         let reg = ActivityRegistry::new();
         let a = Arc::new(ActivityController::new());
         let b = Arc::new(ActivityController::new());
-        reg.insert("a".into(), a.clone());
-        reg.insert("b".into(), b.clone());
+        assert!(matches!(
+            reg.insert_or_active(
+                ActivityHandle {
+                    id: "a".into(),
+                    interval_ms: DEFAULT_INTERVAL_MS,
+                },
+                a.clone(),
+            ),
+            ActivityInsert::Inserted
+        ));
+        match reg.insert_or_active(
+            ActivityHandle {
+                id: "b".into(),
+                interval_ms: DEFAULT_INTERVAL_MS,
+            },
+            b,
+        ) {
+            ActivityInsert::Active(active) => assert_eq!(active.id, "a"),
+            ActivityInsert::Inserted => panic!("expected active handle reuse"),
+        }
+        assert_eq!(reg.len(), 1);
         reg.cancel_all();
         assert!(a.is_cancelled());
-        assert!(b.is_cancelled());
     }
 
     #[test]

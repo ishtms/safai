@@ -3174,7 +3174,9 @@ name = "safai"
 version = "0.2.1"
 dependencies = [
  "blake3",
+ "dirs",
  "jwalk",
+ "plist",
  "rayon",
  "serde",
  "serde_json",
@@ -3185,6 +3187,8 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tempfile",
+ "winreg",
+ "xattr",
 ]
 
 [[package]]

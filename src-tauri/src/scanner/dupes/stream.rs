@@ -7,8 +7,8 @@
 //! this variant:
 //!
 //! * pipeline runs to completion but emits progress events along the way.
-//!   can't group before the size pass so you get one snapshot per phase
-//!   plus a terminal done.
+//!   walking progress carries counters, phase progress carries pruning
+//!   counts, and the terminal done carries confirmed groups.
 //! * [`DupesRegistry`] tracks live handles for cancel.
 //! * cancel checked inside hash passes via AtomicBool, takes effect on
 //!   next file not at completion.
@@ -67,15 +67,15 @@ impl Default for DupesController {
 // ---------- emitter ----------
 
 /// emit sink. tests use a Vec recorder, Tauri adapter bridges to
-/// AppHandle::emit. walker calls emit_progress once per phase and
-/// emit_done exactly once.
+/// AppHandle::emit. walker emits counter progress, then emit_done exactly
+/// once with final groups.
 pub trait DupesEmit: Send + Sync {
     fn emit_progress(&self, handle_id: &str, resp: &DuplicateReport);
     fn emit_done(&self, handle_id: &str, resp: &DuplicateReport);
 }
 
-/// phase label on the wire. UI renders "Walking...", "Hashing 4 KB of 42k
-/// files", etc.
+/// phase label on the wire. UI renders concrete copy for walking,
+/// size-grouping, and full-content hashing.
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScanPhase {
@@ -86,9 +86,18 @@ pub enum ScanPhase {
 }
 
 impl ScanPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanPhase::Walking => "walking",
+            ScanPhase::SizeGrouped => "size-grouped",
+            ScanPhase::HeadHashed => "head-hashed",
+            ScanPhase::Done => "done",
+        }
+    }
+
     fn from_pipeline(p: Phase) -> Self {
         match p {
-            Phase::WalkDone => ScanPhase::Walking,
+            Phase::Walking | Phase::WalkDone => ScanPhase::Walking,
             Phase::SizeGrouped => ScanPhase::SizeGrouped,
             Phase::HeadHashed => ScanPhase::HeadHashed,
             Phase::Done => ScanPhase::Done,
@@ -107,11 +116,8 @@ pub struct DupesHandle {
 /// drive one streaming dedup walk to completion. blocks, spawn in a
 /// dedicated thread.
 ///
-/// emits one progress snapshot (empty groups + total_files_scanned) per
-/// phase, then a terminal done with the grouped result. cheap intermediate
-/// progress on purpose: emitting between every hash would need a progress
-/// callback through rayon's iterators, and the dominant user-visible
-/// latency is the walk anyway.
+/// emits walking snapshots with live counters, phase snapshots after each
+/// pruning pass, then a terminal done with the grouped result.
 pub fn run_dupes_stream<E: DupesEmit>(
     handle_id: String,
     root: PathBuf,
@@ -146,7 +152,9 @@ pub fn run_dupes_stream<E: DupesEmit>(
     // so we need Sync storage
     let files_scanned_atomic = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let remaining_atomic = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let phase_atomic = Arc::new(std::sync::atomic::AtomicU8::new(phase_to_u8(ScanPhase::Walking)));
+    let phase_atomic = Arc::new(std::sync::atomic::AtomicU8::new(phase_to_u8(
+        ScanPhase::Walking,
+    )));
 
     // phase callback: store snapshot + emit progress with empty groups.
     // UI keeps previously-seen groups and re-reads phase + counters.
@@ -157,19 +165,21 @@ pub fn run_dupes_stream<E: DupesEmit>(
     let files_atomic_cb = Arc::clone(&files_scanned_atomic);
     let remaining_atomic_cb = Arc::clone(&remaining_atomic);
     let phase_atomic_cb = Arc::clone(&phase_atomic);
-    let on_phase = move |p, count: u64| {
+    let on_phase = move |p, files_scanned: u64, candidates_remaining: u64| {
         let phase = ScanPhase::from_pipeline(p);
         phase_atomic_cb.store(phase_to_u8(phase), Ordering::Release);
         match phase {
             ScanPhase::Walking => {
-                files_atomic_cb.store(count, Ordering::Release);
-                remaining_atomic_cb.store(count, Ordering::Release);
+                files_atomic_cb.store(files_scanned, Ordering::Release);
+                remaining_atomic_cb.store(candidates_remaining, Ordering::Release);
             }
             ScanPhase::SizeGrouped | ScanPhase::HeadHashed => {
-                remaining_atomic_cb.store(count, Ordering::Release);
+                files_atomic_cb.store(files_scanned, Ordering::Release);
+                remaining_atomic_cb.store(candidates_remaining, Ordering::Release);
             }
             ScanPhase::Done => {
-                remaining_atomic_cb.store(count, Ordering::Release);
+                files_atomic_cb.store(files_scanned, Ordering::Release);
+                remaining_atomic_cb.store(candidates_remaining, Ordering::Release);
             }
         }
         // skip the terminal Done snapshot here, outer function assembles
@@ -230,7 +240,20 @@ fn phase_to_u8(p: ScanPhase) -> u8 {
 
 #[derive(Default)]
 pub struct DupesRegistry {
-    inner: Mutex<std::collections::HashMap<String, Arc<DupesController>>>,
+    inner: Mutex<std::collections::HashMap<String, DupesEntry>>,
+}
+
+#[derive(Clone)]
+struct DupesEntry {
+    ctrl: Arc<DupesController>,
+    handle: DupesHandle,
+    done: Option<DuplicateReport>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DupesInsert {
+    Inserted,
+    Active(DupesHandle),
 }
 
 impl DupesRegistry {
@@ -238,18 +261,57 @@ impl DupesRegistry {
         Self::default()
     }
 
-    pub fn insert(&self, id: String, ctrl: Arc<DupesController>) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.insert(id, ctrl);
+    pub fn insert_or_active(&self, handle: DupesHandle, ctrl: Arc<DupesController>) -> DupesInsert {
+        let mut g = self.inner.lock().expect("dupes registry poisoned");
+        if let Some(active) = g.values().find(|entry| entry.done.is_none()) {
+            return DupesInsert::Active(active.handle.clone());
         }
+        g.insert(
+            handle.id.clone(),
+            DupesEntry {
+                ctrl,
+                handle,
+                done: None,
+            },
+        );
+        DupesInsert::Inserted
+    }
+
+    pub fn active_handle(&self) -> Option<DupesHandle> {
+        self.inner.lock().ok().and_then(|g| {
+            g.values()
+                .find(|entry| entry.done.is_none())
+                .map(|e| e.handle.clone())
+        })
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<DupesController>> {
-        self.inner.lock().ok().and_then(|g| g.get(id).cloned())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).map(|e| e.ctrl.clone()))
     }
 
     pub fn remove(&self, id: &str) -> Option<Arc<DupesController>> {
-        self.inner.lock().ok().and_then(|mut g| g.remove(id))
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(id).map(|e| e.ctrl))
+    }
+
+    pub fn finish(&self, id: &str, report: DuplicateReport) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(entry) = g.get_mut(id) {
+                entry.done = Some(report);
+            }
+        }
+    }
+
+    pub fn terminal_snapshot(&self, id: &str) -> Option<DuplicateReport> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).and_then(|e| e.done.clone()))
     }
 
     #[cfg(test)]
@@ -377,12 +439,84 @@ mod tests {
         let reg = DupesRegistry::new();
         let id = next_dupes_handle_id();
         let ctrl = Arc::new(DupesController::new());
-        reg.insert(id.clone(), ctrl.clone());
+        let handle = DupesHandle {
+            id: id.clone(),
+            root: "/tmp".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(handle, ctrl.clone()),
+            DupesInsert::Inserted
+        ));
         assert_eq!(reg.len(), 1);
         reg.get(&id).unwrap().cancel();
         assert!(ctrl.is_cancelled());
         assert!(reg.remove(&id).is_some());
         assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn registry_reuses_active_handle() {
+        let reg = DupesRegistry::new();
+        let first = DupesHandle {
+            id: "dupes-a".into(),
+            root: "/one".into(),
+        };
+        let second = DupesHandle {
+            id: "dupes-b".into(),
+            root: "/two".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(first.clone(), Arc::new(DupesController::new())),
+            DupesInsert::Inserted
+        ));
+        match reg.insert_or_active(second, Arc::new(DupesController::new())) {
+            DupesInsert::Active(active) => assert_eq!(active.id, first.id),
+            DupesInsert::Inserted => panic!("expected active handle reuse"),
+        }
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn terminal_snapshot_does_not_block_next_handle() {
+        let reg = DupesRegistry::new();
+        let first = DupesHandle {
+            id: "dupes-a".into(),
+            root: "/one".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(first.clone(), Arc::new(DupesController::new())),
+            DupesInsert::Inserted
+        ));
+        let report = DuplicateReport {
+            root: first.root.clone(),
+            groups: Vec::new(),
+            total_files_scanned: 1,
+            total_groups: 0,
+            wasted_bytes: 0,
+            duration_ms: 1,
+            phase: ScanPhase::Done,
+            candidates_remaining: 0,
+        };
+
+        reg.finish(&first.id, report.clone());
+
+        assert_eq!(
+            reg.terminal_snapshot(&first.id)
+                .unwrap()
+                .total_files_scanned,
+            report.total_files_scanned,
+        );
+        assert!(matches!(
+            reg.insert_or_active(
+                DupesHandle {
+                    id: "dupes-b".into(),
+                    root: "/two".into(),
+                },
+                Arc::new(DupesController::new()),
+            ),
+            DupesInsert::Inserted
+        ));
+        assert_eq!(reg.len(), 2);
     }
 
     #[test]
@@ -415,18 +549,28 @@ mod tests {
 
         let progress = rec.progress.lock().unwrap();
         let phases: Vec<ScanPhase> = progress.iter().map(|r| r.phase).collect();
-        // Walking -> SizeGrouped -> HeadHashed (Done lives on the done event)
-        assert_eq!(
-            phases,
-            vec![
-                ScanPhase::Walking,
-                ScanPhase::SizeGrouped,
-                ScanPhase::HeadHashed,
-            ],
-            "unexpected phase sequence",
-        );
-        // candidates should narrow or stay the same
-        for pair in progress.windows(2) {
+        // Walking can emit more than once, then phase transitions follow.
+        let first_walking = phases
+            .iter()
+            .position(|p| *p == ScanPhase::Walking)
+            .expect("missing walking progress");
+        let size_grouped = phases
+            .iter()
+            .position(|p| *p == ScanPhase::SizeGrouped)
+            .expect("missing size-grouped progress");
+        let head_hashed = phases
+            .iter()
+            .position(|p| *p == ScanPhase::HeadHashed)
+            .expect("missing head-hashed progress");
+        assert!(first_walking < size_grouped);
+        assert!(size_grouped < head_hashed);
+
+        // candidates should narrow or stay the same after walking finishes.
+        let pruning: Vec<&DuplicateReport> = progress
+            .iter()
+            .filter(|r| r.phase != ScanPhase::Walking)
+            .collect();
+        for pair in pruning.windows(2) {
             assert!(
                 pair[1].candidates_remaining <= pair[0].candidates_remaining,
                 "candidate count should shrink across phases",

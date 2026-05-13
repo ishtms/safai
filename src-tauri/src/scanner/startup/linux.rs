@@ -23,9 +23,7 @@ use std::io::Write;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
-use super::types::{
-    impact_for_command, make_item_id, path_for_wire, StartupItem, StartupSource,
-};
+use super::types::{impact_for_command, make_item_id, path_for_wire, StartupItem, StartupSource};
 
 pub fn autostart_dir(home: &Path) -> PathBuf {
     home.join(".config/autostart")
@@ -67,19 +65,21 @@ pub fn list_autostart(home: &Path) -> Vec<StartupItem> {
             continue;
         }
         // plain files only. symlinks could redirect a toggle to an unrelated file.
-        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
         if !meta.file_type().is_file() {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
         let parsed = parse_desktop(&text);
 
         let name = parsed
             .get("Name")
             .cloned()
-            .or_else(|| {
-                path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
-            })
+            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
             .unwrap_or_default();
         let command = parsed.get("Exec").cloned().unwrap_or_default();
         let description = parsed
@@ -106,7 +106,12 @@ pub fn list_autostart(home: &Path) -> Vec<StartupItem> {
             impact: impact_for_command(&command),
         });
     }
-    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+    items.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then(a.id.cmp(&b.id))
+    });
     items
 }
 
@@ -191,11 +196,7 @@ fn is_autostart_enabled(parsed: &BTreeMap<String, String>) -> bool {
         Some(t) if t.eq_ignore_ascii_case("application") => {}
         _ => return false,
     }
-    if parsed
-        .get("Hidden")
-        .map(|v| parse_bool(v))
-        .unwrap_or(false)
-    {
+    if parsed.get("Hidden").map(|v| parse_bool(v)).unwrap_or(false) {
         return false;
     }
     if let Some(v) = parsed.get("X-GNOME-Autostart-enabled") {
@@ -287,7 +288,9 @@ pub fn rewrite_desktop_hidden(text: &str, hidden: bool) -> String {
 /// in default.target.wants/, same as `systemctl is-enabled`.
 pub fn list_systemd_user(home: &Path) -> Vec<StartupItem> {
     let dir = systemd_user_dir(home);
-    let Ok(read) = fs::read_dir(&dir) else { return Vec::new() };
+    let Ok(read) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     let wants = systemd_wants_dir(home);
 
     let mut items: Vec<StartupItem> = Vec::new();
@@ -299,7 +302,9 @@ pub fn list_systemd_user(home: &Path) -> Vec<StartupItem> {
         if !matches!(ext, "service" | "socket" | "timer") {
             continue;
         }
-        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
         // skip wants-dir symlinks which sit under the same tree
         if !meta.file_type().is_file() {
             continue;
@@ -307,7 +312,9 @@ pub fn list_systemd_user(home: &Path) -> Vec<StartupItem> {
         let Some(file_name) = path.file_name().and_then(|s| s.to_str()).map(str::to_owned) else {
             continue;
         };
-        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
         let (description, exec_start) = parse_systemd_unit(&text);
         let enabled = wants.join(&file_name).is_symlink();
         let id = make_item_id(StartupSource::LinuxSystemdUser, &file_name);
@@ -354,7 +361,10 @@ pub fn parse_systemd_unit(text: &str) -> (String, String) {
             (Some("Unit"), "Description") => description = value.to_string(),
             (Some("Service"), "ExecStart") => {
                 if exec_start.is_empty() {
-                    exec_start = value.trim_start_matches('-').trim_start_matches('@').to_string();
+                    exec_start = value
+                        .trim_start_matches('-')
+                        .trim_start_matches('@')
+                        .to_string();
                 }
             }
             _ => {}
@@ -508,9 +518,7 @@ mod tests {
 
     #[test]
     fn autostart_hidden_true_disables() {
-        let m = parse_desktop(
-            "[Desktop Entry]\nType=Application\nName=X\nExec=/x\nHidden=true\n",
-        );
+        let m = parse_desktop("[Desktop Entry]\nType=Application\nName=X\nExec=/x\nHidden=true\n");
         assert!(!is_autostart_enabled(&m));
     }
 
@@ -531,9 +539,8 @@ mod tests {
     #[test]
     fn autostart_nodisplay_does_not_disable() {
         // NoDisplay = launcher visibility only, spec says it still autostarts
-        let m = parse_desktop(
-            "[Desktop Entry]\nType=Application\nName=X\nExec=/x\nNoDisplay=true\n",
-        );
+        let m =
+            parse_desktop("[Desktop Entry]\nType=Application\nName=X\nExec=/x\nNoDisplay=true\n");
         assert!(is_autostart_enabled(&m));
     }
 
@@ -615,7 +622,10 @@ mod tests {
         let home = dir.path();
         let autostart = home.join(".config/autostart");
         fs::create_dir_all(&autostart).unwrap();
-        write(&autostart.join("weird.desktop"), "completely broken content");
+        write(
+            &autostart.join("weird.desktop"),
+            "completely broken content",
+        );
         let items = list_autostart(home);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "weird");
@@ -647,11 +657,15 @@ mod tests {
     #[test]
     fn rewrite_coerces_gnome_key_to_agree() {
         // both keys existing = must not disagree after toggle
-        let input = "[Desktop Entry]\nType=Application\nName=X\nExec=/x\nX-GNOME-Autostart-enabled=true\n";
+        let input =
+            "[Desktop Entry]\nType=Application\nName=X\nExec=/x\nX-GNOME-Autostart-enabled=true\n";
         let out = rewrite_desktop_hidden(input, true);
         let m = parse_desktop(&out);
         assert!(!is_autostart_enabled(&m));
-        assert_eq!(m.get("X-GNOME-Autostart-enabled"), Some(&"false".to_string()));
+        assert_eq!(
+            m.get("X-GNOME-Autostart-enabled"),
+            Some(&"false".to_string())
+        );
         assert_eq!(m.get("Hidden"), Some(&"true".to_string()));
     }
 

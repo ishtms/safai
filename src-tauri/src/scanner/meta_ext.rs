@@ -78,12 +78,16 @@ mod tests {
         let a = allocated_bytes(&meta);
         assert!(a >= 1, "expected non-zero");
         // allocated may be a block (4k) but never larger than the file rounded up reasonably
-        assert!(a <= 64 * 1024, "small file should not allocate more than a block or two");
+        assert!(
+            a <= 64 * 1024,
+            "small file should not allocate more than a block or two"
+        );
     }
 
     #[test]
     fn sparse_container_matches_docker() {
-        let p = Path::new("/Users/x/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw");
+        let p =
+            Path::new("/Users/x/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw");
         assert!(is_sparse_container_path(p));
     }
 
@@ -95,9 +99,7 @@ mod tests {
 
     #[test]
     fn sparse_container_matches_ios_sim() {
-        let p = Path::new(
-            "/Users/x/Library/Developer/CoreSimulator/Devices/ABC/data/Containers",
-        );
+        let p = Path::new("/Users/x/Library/Developer/CoreSimulator/Devices/ABC/data/Containers");
         assert!(is_sparse_container_path(p));
     }
 

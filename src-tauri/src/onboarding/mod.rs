@@ -18,10 +18,12 @@
 //! a restore, two files side-by-side but independent.
 
 pub mod permissions;
+pub mod state_store;
 pub mod storage;
 pub mod types;
 
 pub use permissions::{applicable_for, detect_status, open_settings, settings_url, Platform};
+pub use state_store::OnboardingStore;
 #[allow(unused_imports)]
 pub use storage::{load, load_or_default, reset, save, state_path, STATE_FILE_NAME};
 #[allow(unused_imports)]
@@ -140,9 +142,7 @@ mod facade_tests {
         let reader_stop = stop.clone();
         let reader = std::thread::spawn(move || {
             while !reader_stop.load(Ordering::Relaxed) {
-                if let Ok(text) =
-                    std::fs::read_to_string(reader_path.join(STATE_FILE_NAME))
-                {
+                if let Ok(text) = std::fs::read_to_string(reader_path.join(STATE_FILE_NAME)) {
                     if !text.is_empty() && serde_json::from_str::<OnboardingState>(&text).is_err() {
                         reader_errors.fetch_add(1, Ordering::Relaxed);
                     }
@@ -252,4 +252,3 @@ mod facade_tests {
         assert_eq!(s, OnboardingState::default());
     }
 }
-

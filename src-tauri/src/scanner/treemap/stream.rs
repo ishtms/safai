@@ -4,9 +4,11 @@
 //! roots. 250k+ file homes would stare at "0 B" for a bit, so this streams:
 //!
 //! * walker owns a single [`BuildNode`] on its thread
-//! * every [`PROGRESS_THROTTLE`] (~150ms) snapshots tree + emits a
-//!   `treemap://progress` with full [`TreemapResponse`]. snapshot is cheap,
-//!   O(nodes within max_depth).
+//! * cheap counter-only progress arrives first so the UI can paint totals
+//!   without cloning the partial tree.
+//! * capped tree snapshots arrive at a slower adaptive cadence. high-fanout
+//!   directories can contain thousands of siblings, so progress never clones
+//!   more than [`PROGRESS_NODE_CHILD_CAP`] children per node.
 //! * terminal `treemap://done` carries final sorted response after walk ends
 //!   (or is cancelled).
 //!
@@ -19,13 +21,21 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::scanner::fs_guard;
+
 use super::tree::{insert_file, BuildNode, TreeBuildError};
 use super::{lay_out_children_of, BiggestFolder, TreemapResponse};
 
-/// min interval between snapshots. bigger than the scanner's 50ms because a
-/// full snapshot + layout is heavier than a counter. 150ms feels live while
-/// letting IO dominate.
-pub const PROGRESS_THROTTLE: Duration = Duration::from_millis(150);
+/// cheap counter-only progress while the first tree snapshot warms up.
+pub const COUNTER_PROGRESS_THROTTLE: Duration = Duration::from_millis(250);
+
+/// smallest interval between progress tree snapshots. The adaptive cadence
+/// grows on large walks so allocation/serialization does not compete with IO.
+pub const MIN_TREE_PROGRESS_THROTTLE: Duration = Duration::from_millis(750);
+
+/// progress snapshots keep only the biggest children per node. Final done/cache
+/// snapshots still use the full tree.
+pub const PROGRESS_NODE_CHILD_CAP: usize = 128;
 
 pub struct TreemapController {
     cancelled: AtomicBool,
@@ -94,8 +104,8 @@ pub fn preflight_root(root: &Path) -> Result<PathBuf, TreeBuildError> {
 
 /// drive one walk to completion. blocks, spawn in a dedicated thread.
 ///
-/// every PROGRESS_THROTTLE (+ on completion) calls emit_progress with a
-/// freshly-laid-out response. last emission is `done`.
+/// counter-only progress is emitted early. Capped tree snapshots are emitted
+/// at an adaptive lower frequency. Last emission is `done` with full data.
 ///
 /// cancel is checked between every jwalk entry. cancel flips the atomic, walker
 /// exits on next tick + emits final `done` with whatever was aggregated.
@@ -124,6 +134,7 @@ pub fn run_treemap_stream<E: TreemapEmit>(
                 total_files: 1,
                 tiles: Vec::new(),
                 biggest: Vec::new(),
+                scanned_at: super::now_unix(),
                 duration_ms: ctrl.started.elapsed().as_millis() as u64,
             };
             emit.emit_done(&handle_id, &resp);
@@ -132,13 +143,25 @@ pub fn run_treemap_stream<E: TreemapEmit>(
     }
 
     let mut root_node = BuildNode::new_dir(root_name, root.clone());
-    let mut last_emit = Instant::now()
-        .checked_sub(PROGRESS_THROTTLE)
+    let mut last_counter_emit = Instant::now()
+        .checked_sub(COUNTER_PROGRESS_THROTTLE)
         .unwrap_or_else(Instant::now);
+    let mut last_tree_emit = Instant::now();
+    let mut emitted_tree = false;
 
+    let root_dev = fs_guard::root_device_id(&root);
     let walker = jwalk::WalkDir::new(&root)
         .skip_hidden(false)
-        .follow_links(false);
+        .follow_links(false)
+        .process_read_dir(move |_depth, _path, _state, children| {
+            children.retain(|res| match res {
+                Ok(entry) => match entry.metadata() {
+                    Ok(meta) => fs_guard::is_on_root_device(root_dev, &meta),
+                    Err(_) => true,
+                },
+                Err(_) => true,
+            });
+        });
 
     for entry in walker {
         if ctrl.is_cancelled() {
@@ -166,12 +189,18 @@ pub fn run_treemap_stream<E: TreemapEmit>(
         ctrl.files_scanned.fetch_add(1, Ordering::Relaxed);
         ctrl.bytes_scanned.fetch_add(bytes, Ordering::Relaxed);
 
-        // throttled emit. first check fires immediately since last_emit was
-        // initialised PROGRESS_THROTTLE in the past.
         let now = Instant::now();
-        if now.duration_since(last_emit) >= PROGRESS_THROTTLE {
-            last_emit = now;
-            let resp = build_response(&root_node, &ctrl, max_laid_out);
+        let files = ctrl.files_scanned.load(Ordering::Relaxed);
+        if now.duration_since(last_tree_emit) >= tree_progress_interval(files) {
+            last_tree_emit = now;
+            emitted_tree = true;
+            let resp = build_progress_response(&root_node, &ctrl, max_laid_out);
+            emit.emit_progress(&handle_id, &resp);
+        } else if !emitted_tree
+            && now.duration_since(last_counter_emit) >= COUNTER_PROGRESS_THROTTLE
+        {
+            last_counter_emit = now;
+            let resp = counter_response(&root, &ctrl);
             emit.emit_progress(&handle_id, &resp);
         }
     }
@@ -186,12 +215,38 @@ pub fn run_treemap_stream<E: TreemapEmit>(
     }
 }
 
-fn build_response(
+fn build_progress_response(
     root_node: &BuildNode,
     ctrl: &TreemapController,
     max_laid_out: usize,
 ) -> TreemapResponse {
-    response_from_tree(&root_node.snapshot(), ctrl, max_laid_out)
+    response_from_tree(
+        &root_node.snapshot_capped(PROGRESS_NODE_CHILD_CAP),
+        ctrl,
+        max_laid_out,
+    )
+}
+
+fn counter_response(root: &Path, ctrl: &TreemapController) -> TreemapResponse {
+    TreemapResponse {
+        root: root.to_string_lossy().into_owned(),
+        total_bytes: ctrl.bytes_scanned.load(Ordering::Relaxed),
+        total_files: ctrl.files_scanned.load(Ordering::Relaxed),
+        tiles: Vec::new(),
+        biggest: Vec::new(),
+        scanned_at: super::now_unix(),
+        duration_ms: ctrl.started.elapsed().as_millis() as u64,
+    }
+}
+
+fn tree_progress_interval(files_scanned: u64) -> Duration {
+    if files_scanned >= 50_000 {
+        Duration::from_millis(3_000)
+    } else if files_scanned >= 5_000 {
+        Duration::from_millis(1_500)
+    } else {
+        MIN_TREE_PROGRESS_THROTTLE
+    }
 }
 
 fn response_from_tree(
@@ -207,6 +262,7 @@ fn response_from_tree(
         total_files: tree.file_count,
         tiles,
         biggest,
+        scanned_at: super::now_unix(),
         duration_ms: ctrl.started.elapsed().as_millis() as u64,
     }
 }
@@ -216,7 +272,20 @@ fn response_from_tree(
 /// active walks. usually one at a time, kept so UI can cancel cleanly.
 #[derive(Default)]
 pub struct TreemapRegistry {
-    inner: Mutex<std::collections::HashMap<String, Arc<TreemapController>>>,
+    inner: Mutex<std::collections::HashMap<String, TreemapEntry>>,
+}
+
+#[derive(Clone)]
+struct TreemapEntry {
+    ctrl: Arc<TreemapController>,
+    handle: TreemapHandle,
+    done: Option<TreemapResponse>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TreemapInsert {
+    Inserted,
+    Active(TreemapHandle),
 }
 
 impl TreemapRegistry {
@@ -224,18 +293,61 @@ impl TreemapRegistry {
         Self::default()
     }
 
-    pub fn insert(&self, id: String, ctrl: Arc<TreemapController>) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.insert(id, ctrl);
+    pub fn insert_or_active(
+        &self,
+        handle: TreemapHandle,
+        ctrl: Arc<TreemapController>,
+    ) -> TreemapInsert {
+        let mut g = self.inner.lock().expect("treemap registry poisoned");
+        if let Some(active) = g.values().find(|entry| entry.done.is_none()) {
+            return TreemapInsert::Active(active.handle.clone());
         }
+        g.insert(
+            handle.id.clone(),
+            TreemapEntry {
+                ctrl,
+                handle,
+                done: None,
+            },
+        );
+        TreemapInsert::Inserted
+    }
+
+    pub fn active_handle(&self) -> Option<TreemapHandle> {
+        self.inner.lock().ok().and_then(|g| {
+            g.values()
+                .find(|entry| entry.done.is_none())
+                .map(|e| e.handle.clone())
+        })
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<TreemapController>> {
-        self.inner.lock().ok().and_then(|g| g.get(id).cloned())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).map(|e| e.ctrl.clone()))
     }
 
     pub fn remove(&self, id: &str) -> Option<Arc<TreemapController>> {
-        self.inner.lock().ok().and_then(|mut g| g.remove(id))
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(id).map(|e| e.ctrl))
+    }
+
+    pub fn finish(&self, id: &str, response: TreemapResponse) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(entry) = g.get_mut(id) {
+                entry.done = Some(response);
+            }
+        }
+    }
+
+    pub fn terminal_snapshot(&self, id: &str) -> Option<TreemapResponse> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).and_then(|e| e.done.clone()))
     }
 
     #[cfg(test)]
@@ -381,6 +493,13 @@ mod tests {
     }
 
     #[test]
+    fn tree_progress_interval_backs_off_on_large_walks() {
+        assert_eq!(tree_progress_interval(0), MIN_TREE_PROGRESS_THROTTLE);
+        assert!(tree_progress_interval(5_000) > MIN_TREE_PROGRESS_THROTTLE);
+        assert!(tree_progress_interval(50_000) > tree_progress_interval(5_000));
+    }
+
+    #[test]
     fn file_root_short_circuits() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("lonely.bin");
@@ -388,14 +507,7 @@ mod tests {
 
         let ctrl = Arc::new(TreemapController::new());
         let rec = Arc::new(Recorder::default());
-        run_treemap_stream(
-            "h-file".into(),
-            p,
-            4,
-            64,
-            ctrl,
-            ArcEmit(rec.clone()),
-        );
+        run_treemap_stream("h-file".into(), p, 4, 64, ctrl, ArcEmit(rec.clone()));
 
         let prog = rec.progress.lock().unwrap();
         let done = rec.done.lock().unwrap();
@@ -410,12 +522,81 @@ mod tests {
         let reg = TreemapRegistry::new();
         let id = next_treemap_handle_id();
         let ctrl = Arc::new(TreemapController::new());
-        reg.insert(id.clone(), ctrl.clone());
+        let handle = TreemapHandle {
+            id: id.clone(),
+            root: "/tmp".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(handle, ctrl.clone()),
+            TreemapInsert::Inserted
+        ));
         assert_eq!(reg.len(), 1);
         reg.get(&id).unwrap().cancel();
         assert!(ctrl.is_cancelled());
         assert!(reg.remove(&id).is_some());
         assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn registry_reuses_active_handle() {
+        let reg = TreemapRegistry::new();
+        let first = TreemapHandle {
+            id: "tree-a".into(),
+            root: "/one".into(),
+        };
+        let second = TreemapHandle {
+            id: "tree-b".into(),
+            root: "/two".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(first.clone(), Arc::new(TreemapController::new())),
+            TreemapInsert::Inserted
+        ));
+        match reg.insert_or_active(second, Arc::new(TreemapController::new())) {
+            TreemapInsert::Active(active) => assert_eq!(active.id, first.id),
+            TreemapInsert::Inserted => panic!("expected active handle reuse"),
+        }
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn terminal_snapshot_does_not_block_next_handle() {
+        let reg = TreemapRegistry::new();
+        let first = TreemapHandle {
+            id: "tree-a".into(),
+            root: "/one".into(),
+        };
+        assert!(matches!(
+            reg.insert_or_active(first.clone(), Arc::new(TreemapController::new())),
+            TreemapInsert::Inserted
+        ));
+        let response = TreemapResponse {
+            root: first.root.clone(),
+            total_bytes: 1,
+            total_files: 1,
+            tiles: Vec::new(),
+            biggest: Vec::new(),
+            scanned_at: 1,
+            duration_ms: 1,
+        };
+
+        reg.finish(&first.id, response.clone());
+
+        assert_eq!(
+            reg.terminal_snapshot(&first.id).unwrap().total_bytes,
+            response.total_bytes,
+        );
+        assert!(matches!(
+            reg.insert_or_active(
+                TreemapHandle {
+                    id: "tree-b".into(),
+                    root: "/two".into(),
+                },
+                Arc::new(TreemapController::new()),
+            ),
+            TreemapInsert::Inserted
+        ));
+        assert_eq!(reg.len(), 2);
     }
 
     #[test]

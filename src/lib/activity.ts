@@ -3,6 +3,7 @@
 
 import { invoke, listen } from './ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import { createEnvelopeGate, type IpcEventEnvelope } from './events';
 
 export interface ProcessRow {
   pid: number;
@@ -69,6 +70,10 @@ export function activitySample(topN: number = DEFAULT_TOP_N): Promise<ActivitySn
   return invoke<ActivitySnapshot>('activity_sample', { topN }, () => mockSnapshot(0));
 }
 
+export function activityProcessDetail(pid: number): Promise<ProcessRow | null> {
+  return invoke<ProcessRow | null>('activity_process_detail', { pid }, () => null);
+}
+
 export function startActivity(opts: ActivityStartOptions = {}): Promise<ActivityHandle> {
   const { intervalMs, topN } = opts;
   return invoke<ActivityHandle>(
@@ -102,11 +107,17 @@ export interface ActivitySubscriptions {
   onSnapshot?: (snap: ActivitySnapshot) => void;
 }
 
-export async function subscribeActivity(subs: ActivitySubscriptions): Promise<UnlistenFn> {
+export async function subscribeActivity(
+  handleId: string,
+  subs: ActivitySubscriptions,
+): Promise<UnlistenFn> {
   const unlisteners: UnlistenFn[] = [];
+  const accept = createEnvelopeGate(handleId);
   if (subs.onSnapshot) {
     unlisteners.push(
-      await listen<ActivitySnapshot>(EVENT_ACTIVITY_SNAPSHOT, (s) => subs.onSnapshot!(s)),
+      await listen<IpcEventEnvelope<ActivitySnapshot>>(EVENT_ACTIVITY_SNAPSHOT, (ev) => {
+        accept(ev, (payload) => subs.onSnapshot!(payload));
+      }),
     );
   }
   return () => {

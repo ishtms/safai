@@ -9,9 +9,8 @@
 //! category totals come from the untruncated list so the dashboard number
 //! is never smaller than the sum of visible rows.
 //!
-//! categories scanned concurrently via thread::scope. each jwalk uses rayon's
-//! global pool, so big ones (caches, DerivedData) dominate and cheap ones
-//! (Trash, logs) interleave for free.
+//! categories scan sequentially. each recursive subtree already uses jwalk's
+//! Rayon pool, so additional category threads only oversubscribe CPU and disk.
 //!
 //! perms-denied / missing bases are skipped silently. "base not present" =
 //! zero bytes (e.g. no Xcode installed). the `available` flag on
@@ -23,8 +22,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::catalog::{catalog_for, platform_tag, JunkCategoryId, JunkCategorySpec, Os};
+use super::super::fs_guard;
 use super::super::meta_ext::allocated_bytes;
+use super::catalog::{catalog_for, platform_tag, JunkCategoryId, JunkCategorySpec, Os};
 
 /// cap on detail rows per category. totals still count everything,
 /// nobody scrolls past 100 cache subdirs.
@@ -79,17 +79,7 @@ pub fn scan_junk(home: &Path, os: Os) -> JunkReport {
     let started = std::time::Instant::now();
     let catalog = catalog_for(os, home);
 
-    // each closure borrows &JunkCategorySpec for the scope, no clone needed
-    let reports: Vec<JunkCategoryReport> = std::thread::scope(|s| {
-        let handles: Vec<_> = catalog
-            .iter()
-            .map(|spec| s.spawn(|| scan_category(spec)))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| default_report_for_panic()))
-            .collect()
-    });
+    let reports: Vec<JunkCategoryReport> = catalog.iter().map(scan_category).collect();
 
     let total_bytes = reports.iter().map(|r| r.bytes).sum();
     let total_items = reports.iter().map(|r| r.items).sum();
@@ -154,6 +144,7 @@ fn scan_direct_children(base: &Path) -> Vec<JunkPathDetail> {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
+    let base_dev = fs_guard::root_device_id(base);
 
     let mut out = Vec::new();
     for entry in read.flatten() {
@@ -173,7 +164,13 @@ fn scan_direct_children(base: &Path) -> Vec<JunkPathDetail> {
         }
 
         if ft.is_dir() {
-            let (bytes, files, mtime) = sum_subtree(&path);
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !fs_guard::is_on_root_device(base_dev, &meta) {
+                continue;
+            }
+            let (bytes, files, mtime) = sum_subtree(&path, base_dev);
             // skip empty subtrees, they just clutter detail rows
             if files == 0 && bytes == 0 {
                 continue;
@@ -193,7 +190,7 @@ fn scan_direct_children(base: &Path) -> Vec<JunkPathDetail> {
 
 /// sum size of dir + every descendant file. no symlink follow. jwalk
 /// (rayon parallel) so 50k trees walk fast.
-fn sum_subtree(dir: &Path) -> (u64, u64, Option<u64>) {
+fn sum_subtree(dir: &Path, root_dev: Option<fs_guard::DeviceId>) -> (u64, u64, Option<u64>) {
     let mut bytes = 0u64;
     let mut files = 0u64;
     let mut newest: Option<u64> = None;
@@ -201,6 +198,15 @@ fn sum_subtree(dir: &Path) -> (u64, u64, Option<u64>) {
     for entry in jwalk::WalkDir::new(dir)
         .skip_hidden(false)
         .follow_links(false)
+        .process_read_dir(move |_depth, _path, _state, children| {
+            children.retain(|res| match res {
+                Ok(entry) => match entry.metadata() {
+                    Ok(meta) => fs_guard::is_on_root_device(root_dev, &meta),
+                    Err(_) => true,
+                },
+                Err(_) => true,
+            });
+        })
     {
         let Ok(entry) = entry else { continue };
         let Ok(meta) = entry.metadata() else { continue };
@@ -242,22 +248,6 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// fallback when a scan thread panics. keeps wire shape intact so the UI
-/// just sees zero instead of special-casing.
-fn default_report_for_panic() -> JunkCategoryReport {
-    JunkCategoryReport {
-        id: JunkCategoryId::UserCaches,
-        label: String::new(),
-        description: String::new(),
-        icon: String::new(),
-        hot: false,
-        bytes: 0,
-        items: 0,
-        available: false,
-        paths: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::catalog::catalog_for;
@@ -297,17 +287,29 @@ mod tests {
                 // user caches: 3 app folders
                 ("Library/Caches/Google/Chrome/Cache/data.bin", 1024 * 1024), // 1 MiB
                 ("Library/Caches/Google/Chrome/Cache/more.bin", 512 * 1024),
-                ("Library/Caches/Spotify/PersistentCache/blob", 2 * 1024 * 1024),
+                (
+                    "Library/Caches/Spotify/PersistentCache/blob",
+                    2 * 1024 * 1024,
+                ),
                 ("Library/Caches/Slack/Cache/session", 256 * 1024),
                 // system logs
                 ("Library/Logs/Homebrew/install.log", 64 * 1024),
                 ("Library/Logs/Homebrew/error.log", 32 * 1024),
                 // xcode DerivedData
-                ("Library/Developer/Xcode/DerivedData/App-abc/Build/Intermediates/x.o", 4 * 1024 * 1024),
-                ("Library/Developer/Xcode/DerivedData/App-abc/Build/Products/AppBin", 2 * 1024 * 1024),
+                (
+                    "Library/Developer/Xcode/DerivedData/App-abc/Build/Intermediates/x.o",
+                    4 * 1024 * 1024,
+                ),
+                (
+                    "Library/Developer/Xcode/DerivedData/App-abc/Build/Products/AppBin",
+                    2 * 1024 * 1024,
+                ),
                 // cargo cache (both halves)
                 (".cargo/registry/cache/index-abc/tokio.crate", 100 * 1024),
-                (".cargo/registry/src/index-abc/tokio-1.0/src/lib.rs", 80 * 1024),
+                (
+                    ".cargo/registry/src/index-abc/tokio-1.0/src/lib.rs",
+                    80 * 1024,
+                ),
                 // npm cache
                 (".npm/_cacache/content-v2/aa/bb/deadbeef", 200 * 1024),
                 // trash, single loose file
@@ -383,7 +385,11 @@ mod tests {
 
         assert_eq!(report.categories.len(), catalog.len());
         for cat in &report.categories {
-            assert!(!cat.available, "{:?} should be unavailable on empty home", cat.id);
+            assert!(
+                !cat.available,
+                "{:?} should be unavailable on empty home",
+                cat.id
+            );
             assert_eq!(cat.bytes, 0);
             assert_eq!(cat.items, 0);
             assert!(cat.paths.is_empty());
@@ -398,10 +404,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = synth_mac_home(&tmp);
         let report = scan_junk(&home, Os::Mac);
-        let want: Vec<JunkCategoryId> = catalog_for(Os::Mac, &home)
-            .iter()
-            .map(|c| c.id)
-            .collect();
+        let want: Vec<JunkCategoryId> = catalog_for(Os::Mac, &home).iter().map(|c| c.id).collect();
         let got: Vec<JunkCategoryId> = report.categories.iter().map(|c| c.id).collect();
         assert_eq!(got, want);
     }
@@ -527,10 +530,7 @@ mod tests {
         let home = tmp.path().to_path_buf();
         let mut files: Vec<(String, usize)> = Vec::with_capacity(1_000);
         for i in 0..1_000 {
-            files.push((
-                format!("Library/Caches/app{}/f{}.bin", i % 20, i),
-                1024,
-            ));
+            files.push((format!("Library/Caches/app{}/f{}.bin", i % 20, i), 1024));
         }
         let refs: Vec<(&str, usize)> = files.iter().map(|(s, n)| (s.as_str(), *n)).collect();
         make_tree(&home, &refs);
@@ -578,10 +578,7 @@ mod tests {
             drop(f);
 
             // inside-home real file + symlink-as-direct-child
-            make_tree(
-                &home,
-                &[("Library/Caches/Real/data.bin", 1000)],
-            );
+            make_tree(&home, &[("Library/Caches/Real/data.bin", 1000)]);
             let symlink_path = home.join("Library/Caches/LinkToOutside");
             unix_fs::symlink(&outside_dir, &symlink_path).unwrap();
 

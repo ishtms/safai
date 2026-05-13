@@ -3,6 +3,7 @@
 
 import { invoke, listen } from './ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import { createEnvelopeGate, type IpcEventEnvelope } from './events';
 
 export interface DuplicateFile {
   path: string;
@@ -24,21 +25,24 @@ export type ScanPhase = 'walking' | 'size-grouped' | 'head-hashed' | 'done';
 export interface DuplicateReport {
   root: string;
   groups: DuplicateGroup[];
+  /** regular files seen during the walk; small files can be counted here then skipped */
   totalFilesScanned: number;
   totalGroups: number;
   wastedBytes: number;
   durationMs: number;
   /** current phase, `done` means groups are final */
   phase: ScanPhase;
-  /** files still in play for the next phase */
+  /** eligible files while walking, then files still in play for the next phase */
   candidatesRemaining: number;
 }
 
 export interface DuplicateOptions {
   root?: string;
-  /** files smaller than this get skipped. rust default is 4kb */
+  /** files smaller than this get skipped. rust default is 1 MiB */
   minBytes?: number;
 }
+
+export const DEFAULT_MIN_BYTES = 1024 * 1024;
 
 // sync scan, rarely used from ui. streaming variant is the default so
 // the ui shows progress instead of spinning
@@ -76,23 +80,33 @@ export function forgetDuplicates(handleId: string): Promise<boolean> {
   return invoke<boolean>('forget_duplicates', { handleId }, () => false);
 }
 
+export function duplicatesSnapshot(handleId: string): Promise<DuplicateReport | null> {
+  return invoke<DuplicateReport | null>('duplicates_snapshot', { handleId }, () => null);
+}
+
 export interface DuplicatesSubscriptions {
   onProgress?: (resp: DuplicateReport) => void;
   onDone?: (resp: DuplicateReport) => void;
 }
 
 export async function subscribeDuplicates(
+  handleId: string,
   subs: DuplicatesSubscriptions,
 ): Promise<UnlistenFn> {
   const unlisteners: UnlistenFn[] = [];
+  const accept = createEnvelopeGate(handleId);
   if (subs.onProgress) {
     unlisteners.push(
-      await listen<DuplicateReport>(CHANNEL_DUPES_PROGRESS, (r) => subs.onProgress!(r)),
+      await listen<IpcEventEnvelope<DuplicateReport>>(CHANNEL_DUPES_PROGRESS, (ev) => {
+        accept(ev, (payload) => subs.onProgress!(payload));
+      }),
     );
   }
   if (subs.onDone) {
     unlisteners.push(
-      await listen<DuplicateReport>(CHANNEL_DUPES_DONE, (r) => subs.onDone!(r)),
+      await listen<IpcEventEnvelope<DuplicateReport>>(CHANNEL_DUPES_DONE, (ev) => {
+        accept(ev, (payload) => subs.onDone!(payload));
+      }),
     );
   }
   return () => {

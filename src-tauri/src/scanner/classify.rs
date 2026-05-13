@@ -164,10 +164,7 @@ mod tests {
             classify(&p("/Library/LaunchDaemons/com.apple.x.plist"), 4096, true),
             None,
         );
-        assert_eq!(
-            classify(&p("/etc/hosts"), 4096, true),
-            None,
-        );
+        assert_eq!(classify(&p("/etc/hosts"), 4096, true), None,);
     }
 
     #[test]

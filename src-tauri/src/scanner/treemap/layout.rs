@@ -194,10 +194,7 @@ fn worst_ratio(row: &[(usize, f64)], w: f64) -> f64 {
         .iter()
         .map(|(_, a)| *a)
         .fold(f64::NEG_INFINITY, f64::max);
-    let r_min = row
-        .iter()
-        .map(|(_, a)| *a)
-        .fold(f64::INFINITY, f64::min);
+    let r_min = row.iter().map(|(_, a)| *a).fold(f64::INFINITY, f64::min);
     let w2 = w * w;
     let s2 = s * s;
     (w2 * r_max / s2).max(s2 / (w2 * r_min))
@@ -296,7 +293,14 @@ mod tests {
     #[test]
     fn two_items_share_area_proportionally() {
         // Bruls example, 6 items summing to a 6x4 canvas
-        let items = w(&[("a", 6.0), ("b", 6.0), ("c", 4.0), ("d", 3.0), ("e", 2.0), ("f", 2.0)]);
+        let items = w(&[
+            ("a", 6.0),
+            ("b", 6.0),
+            ("c", 4.0),
+            ("d", 3.0),
+            ("e", 2.0),
+            ("f", 2.0),
+        ]);
         let bounds = Rect {
             x: 0.0,
             y: 0.0,
@@ -335,10 +339,7 @@ mod tests {
             }
             let total: f64 = out.iter().map(|r| r.area()).sum();
             // 1% slack for f32 quantisation with lots of small tiles
-            assert!(
-                (total - 1.0).abs() < 0.01,
-                "n={n} total_area={total}",
-            );
+            assert!((total - 1.0).abs() < 0.01, "n={n} total_area={total}",);
         }
     }
 
@@ -391,10 +392,7 @@ mod tests {
         for r in &out {
             if r.w > 1e-4 && r.h > 1e-4 {
                 let ratio = (r.w as f64).max(r.h as f64) / (r.w as f64).min(r.h as f64);
-                assert!(
-                    ratio < 20.0,
-                    "degenerate aspect ratio {ratio}: {r:?}",
-                );
+                assert!(ratio < 20.0, "degenerate aspect ratio {ratio}: {r:?}",);
             }
         }
     }
@@ -429,7 +427,9 @@ mod tests {
 
     #[test]
     fn large_input_runs_fast() {
-        let items: Vec<(String, f64)> = (0..512).map(|i| (format!("i{i}"), (512 - i) as f64)).collect();
+        let items: Vec<(String, f64)> = (0..512)
+            .map(|i| (format!("i{i}"), (512 - i) as f64))
+            .collect();
         let started = std::time::Instant::now();
         let out = squarify(&items, Rect::unit());
         let elapsed = started.elapsed();
@@ -456,7 +456,14 @@ mod tests {
         // classic Bruls '99 example. 6 items, 6x4 canvas. don't care about
         // exact placement (implementations vary on tie axis) but areas must
         // sum and ratios stay reasonable.
-        let items = w(&[("a", 6.0), ("b", 6.0), ("c", 4.0), ("d", 3.0), ("e", 2.0), ("f", 2.0)]);
+        let items = w(&[
+            ("a", 6.0),
+            ("b", 6.0),
+            ("c", 4.0),
+            ("d", 3.0),
+            ("e", 2.0),
+            ("f", 2.0),
+        ]);
         let bounds = Rect {
             x: 0.0,
             y: 0.0,

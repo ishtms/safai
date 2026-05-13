@@ -113,9 +113,12 @@ impl Cleaner {
     }
 
     pub fn restore_last(&self) -> Result<RestoreResult, CleanerError> {
-        let latest = audit::latest_commit(&self.data_dir)?
-            .ok_or(CleanerError::NothingToRestore)?;
-        let result = graveyard::restore_batch(&self.data_dir, &latest.batch_id)?;
+        let batch_id = match audit::latest_commit(&self.data_dir)? {
+            Some(latest) => latest.batch_id,
+            None => graveyard::latest_restorable_batch(&self.data_dir)?
+                .ok_or(CleanerError::NothingToRestore)?,
+        };
+        let result = graveyard::restore_batch(&self.data_dir, &batch_id)?;
         audit::append_restore(&self.data_dir, &result)?;
         Ok(result)
     }
@@ -187,10 +190,7 @@ mod tests {
         let (_tmp, home, data) = fixture();
         let c = Cleaner::new(&data, &home);
 
-        let plan = c.preview(vec![
-            home.join(".cache/spotify"),
-            home.join(".cache/slack"),
-        ]);
+        let plan = c.preview(vec![home.join(".cache/spotify"), home.join(".cache/slack")]);
         let want_bytes = plan.total_bytes;
         let commit = c.commit(&plan.token).unwrap();
         assert_eq!(commit.bytes_trashed, want_bytes);
@@ -223,6 +223,45 @@ mod tests {
         // state, not re-restore
         let err = c.restore_last().unwrap_err();
         assert!(matches!(err, CleanerError::NothingToRestore));
+    }
+
+    #[test]
+    fn restore_last_can_recover_manifest_without_audit_record() {
+        use crate::cleaner::graveyard::{
+            BatchManifest, BatchStatus, ManifestEntry, ManifestEntryState,
+        };
+        use crate::cleaner::types::ItemKind;
+
+        let (_tmp, home, data) = fixture();
+        let c = Cleaner::new(&data, &home);
+        let batch_id = "b-crash";
+        let orig = home.join(".cache/slack/session");
+        let moved = data
+            .join("graveyard")
+            .join(batch_id)
+            .join("items/000000/session");
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::rename(&orig, &moved).unwrap();
+
+        let manifest = BatchManifest {
+            batch_id: batch_id.into(),
+            created_at: 123,
+            status: BatchStatus::Staging,
+            items: vec![ManifestEntry {
+                orig_path: orig.to_string_lossy().into_owned(),
+                moved_path: moved.to_string_lossy().into_owned(),
+                bytes: 2048,
+                file_count: 1,
+                kind: ItemKind::File,
+                state: ManifestEntryState::Pending,
+            }],
+        };
+        let manifest_path = data.join("graveyard").join(batch_id).join("manifest.json");
+        fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+        let restored = c.restore_last().unwrap();
+        assert_eq!(restored.restored.len(), 1);
+        assert!(orig.exists());
     }
 
     #[test]

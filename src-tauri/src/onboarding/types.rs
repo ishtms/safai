@@ -215,12 +215,7 @@ impl OnboardingState {
     }
 
     /// overwrites any existing record for the same kind
-    pub fn record_permission(
-        &mut self,
-        kind: PermissionKind,
-        status: PermissionStatus,
-        now: u64,
-    ) {
+    pub fn record_permission(&mut self, kind: PermissionKind, status: PermissionStatus, now: u64) {
         if let Some(existing) = self.permissions.iter_mut().find(|r| r.kind == kind) {
             existing.status = status;
             existing.answered_at = Some(now);
@@ -287,7 +282,11 @@ mod tests {
     #[test]
     fn state_round_trips_through_serde() {
         let mut s = OnboardingState::default();
-        s.record_permission(PermissionKind::MacFullDiskAccess, PermissionStatus::Granted, 42);
+        s.record_permission(
+            PermissionKind::MacFullDiskAccess,
+            PermissionStatus::Granted,
+            42,
+        );
         s.telemetry_opt_in = true;
         s.mark_complete(100);
         let json = serde_json::to_string(&s).unwrap();
@@ -314,8 +313,16 @@ mod tests {
     #[test]
     fn record_permission_overwrites_existing() {
         let mut s = OnboardingState::default();
-        s.record_permission(PermissionKind::MacFullDiskAccess, PermissionStatus::Denied, 1);
-        s.record_permission(PermissionKind::MacFullDiskAccess, PermissionStatus::Granted, 2);
+        s.record_permission(
+            PermissionKind::MacFullDiskAccess,
+            PermissionStatus::Denied,
+            1,
+        );
+        s.record_permission(
+            PermissionKind::MacFullDiskAccess,
+            PermissionStatus::Granted,
+            2,
+        );
         assert_eq!(s.permissions.len(), 1);
         assert_eq!(s.permissions[0].status, PermissionStatus::Granted);
         assert_eq!(s.permissions[0].answered_at, Some(2));
@@ -324,8 +331,16 @@ mod tests {
     #[test]
     fn record_permission_keeps_distinct_kinds_separate() {
         let mut s = OnboardingState::default();
-        s.record_permission(PermissionKind::MacFullDiskAccess, PermissionStatus::Granted, 1);
-        s.record_permission(PermissionKind::MacFilesAndFolders, PermissionStatus::Denied, 2);
+        s.record_permission(
+            PermissionKind::MacFullDiskAccess,
+            PermissionStatus::Granted,
+            1,
+        );
+        s.record_permission(
+            PermissionKind::MacFilesAndFolders,
+            PermissionStatus::Denied,
+            2,
+        );
         assert_eq!(s.permissions.len(), 2);
     }
 

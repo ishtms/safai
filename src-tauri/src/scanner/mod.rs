@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod classify;
 pub mod dupes;
+pub mod fs_guard;
 pub mod junk;
 pub mod largeold;
 pub mod malware;
@@ -14,5 +15,8 @@ pub mod run;
 pub mod startup;
 pub mod summary;
 pub mod treemap;
+pub mod work_budget;
 
-pub use summary::{empty_summary, summary_from_scan, LastScanFacts, LastScanStore, SmartScanSummary};
+pub use summary::{
+    empty_summary, summary_from_scan, LastScanFacts, LastScanStore, SmartScanSummary,
+};

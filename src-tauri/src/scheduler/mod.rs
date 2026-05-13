@@ -80,6 +80,12 @@ impl Scheduler {
     }
 }
 
+impl Drop for Scheduler {
+    fn drop(&mut self) {
+        self.controller.cancel();
+    }
+}
+
 #[cfg(test)]
 mod facade_tests {
     //! e2e through the public API. verifies the state-change sequence
@@ -216,11 +222,8 @@ mod facade_tests {
         storage::save(tmp.path(), &seed).unwrap();
 
         let now = 1_000_000 + 24 * 3600;
-        let status = SchedulerStatus::derive(
-            seed.prefs.scheduled_scan,
-            seed.last_scheduled_at,
-            now,
-        );
+        let status =
+            SchedulerStatus::derive(seed.prefs.scheduled_scan, seed.last_scheduled_at, now);
         let expected_next = 1_000_000 + 7 * 24 * 3600;
         assert_eq!(status.next_run_at, Some(expected_next));
         assert_eq!(status.seconds_until_next, Some(6 * 24 * 3600));
@@ -295,11 +298,7 @@ mod status_tests {
 
     #[test]
     fn status_round_trips_through_serde_as_camel_case() {
-        let s = SchedulerStatus::derive(
-            Some(ScheduleCadence::Weekly),
-            Some(123),
-            456,
-        );
+        let s = SchedulerStatus::derive(Some(ScheduleCadence::Weekly), Some(123), 456);
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("lastRunAt"), "{j}");
         assert!(j.contains("nextRunAt"), "{j}");
@@ -311,11 +310,7 @@ mod status_tests {
     #[test]
     fn status_saturating_sub_protects_backwards_clock() {
         // last_run is in the future, clock went backwards
-        let s = SchedulerStatus::derive(
-            Some(ScheduleCadence::Daily),
-            Some(2_000_000),
-            1_000_000,
-        );
+        let s = SchedulerStatus::derive(Some(ScheduleCadence::Daily), Some(2_000_000), 1_000_000);
         // invariant: no underflow panic
         assert!(s.seconds_until_next.is_some());
         assert!(s.next_run_at.is_some());

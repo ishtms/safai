@@ -1,4 +1,5 @@
 import {
+  createEffect,
   createMemo,
   createSignal,
   For,
@@ -12,6 +13,7 @@ import { Suds } from '../components/Suds';
 import { Icon } from '../components/Icon';
 import { formatBytes, formatCount } from '../lib/format';
 import {
+  activityProcessDetail,
   filterProcesses,
   killProcess,
   sortProcesses,
@@ -72,6 +74,23 @@ export default function Activity(): JSX.Element {
     if (pid == null) return null;
     return snap()?.processes.find((p) => p.pid === pid) ?? null;
   });
+  const [selectedDetail, setSelectedDetail] = createSignal<ProcessRow | null>(null);
+  let detailRequest = 0;
+  createEffect(() => {
+    const row = selectedRow();
+    const request = ++detailRequest;
+    setSelectedDetail(row);
+    if (!row || row.command) return;
+    void activityProcessDetail(row.pid)
+      .then((detail) => {
+        if (request !== detailRequest || selected() !== row.pid) return;
+        setSelectedDetail(detail ?? row);
+      })
+      .catch(() => {
+        if (request === detailRequest) setSelectedDetail(row);
+      });
+  });
+  const detailRow = createMemo<ProcessRow | null>(() => selectedDetail() ?? selectedRow());
 
   function setSort(k: SortKey) {
     if (sortKey() === k) {
@@ -252,7 +271,7 @@ export default function Activity(): JSX.Element {
           </div>
         </div>
 
-        <DetailPane row={selectedRow()} />
+        <DetailPane row={detailRow()} />
       </div>
 
       <Show when={error()}>

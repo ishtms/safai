@@ -64,7 +64,9 @@ pub fn kill_pid(pid: u32, force: bool) -> Result<(), KillError> {
     } else {
         // SIGTERM on unix. windows returns None (no signal api), fall back to
         // kill() which is TerminateProcess
-        proc_.kill_with(Signal::Term).unwrap_or_else(|| proc_.kill())
+        proc_
+            .kill_with(Signal::Term)
+            .unwrap_or_else(|| proc_.kill())
     };
     if ok {
         Ok(())

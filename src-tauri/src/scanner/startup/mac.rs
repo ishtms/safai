@@ -8,25 +8,29 @@
 //!
 //! # plist parsing
 //!
-//! launch agents on modern mac are almost always XML plists. binary is legal
-//! but rare for user-written agents (Apple's own Info.plist is often binary,
-//! but launchd conventions + docs + installers emit XML). minimal defensive
-//! XML parser for the specific shape we care about:
+//! launch agents can be XML or binary plists. Enumeration uses the `plist`
+//! crate so both formats are parsed through the same typed path. The legacy
+//! XML helpers below remain for targeted rewrite tests and comments, but the
+//! production listing/toggle path is not string-based.
 //!
-//!     <plist version="1.0">
-//!         <dict>
-//!             <key>Label</key>         <string>com.example.foo</string>
-//!             <key>ProgramArguments</key>
-//!             <array>
-//!                 <string>/usr/local/bin/foo</string>
-//!                 <string>--serve</string>
-//!             </array>
-//!             <key>Program</key>       <string>/path/to/binary</string>
-//!             <key>Disabled</key>      <true/>
-//!         </dict>
-//!     </plist>
+//! Shape we care about:
 //!
-//! anything else (binary plists, missing keys, bad XML) rejected gracefully,
+//! ```text
+//! <plist version="1.0">
+//!     <dict>
+//!         <key>Label</key>         <string>com.example.foo</string>
+//!         <key>ProgramArguments</key>
+//!         <array>
+//!             <string>/usr/local/bin/foo</string>
+//!             <string>--serve</string>
+//!         </array>
+//!         <key>Program</key>       <string>/path/to/binary</string>
+//!         <key>Disabled</key>      <true/>
+//!     </dict>
+//! </plist>
+//! ```
+//!
+//! anything else (missing keys, bad data, wrong root) is rejected gracefully;
 //! owner gets zero-or-skipped, never a scan crash.
 //!
 //! # toggle
@@ -37,12 +41,10 @@
 //! works for per-user agents without extra privs and survives reboots.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
-use super::types::{
-    impact_for_command, make_item_id, path_for_wire, StartupItem, StartupSource,
-};
+use super::types::{impact_for_command, make_item_id, path_for_wire, StartupItem, StartupSource};
 
 pub fn user_launch_agents(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents")
@@ -58,16 +60,28 @@ pub fn system_launch_daemons() -> PathBuf {
 
 /// sorted by label for stable wire order
 pub fn list_user_agents(home: &Path) -> Vec<StartupItem> {
-    list_plist_dir(&user_launch_agents(home), StartupSource::MacLaunchAgentUser, true)
+    list_plist_dir(
+        &user_launch_agents(home),
+        StartupSource::MacLaunchAgentUser,
+        true,
+    )
 }
 
 /// read-only, items have is_user=false
 pub fn list_system_agents() -> Vec<StartupItem> {
-    list_plist_dir(&system_launch_agents(), StartupSource::MacLaunchAgentSystem, false)
+    list_plist_dir(
+        &system_launch_agents(),
+        StartupSource::MacLaunchAgentSystem,
+        false,
+    )
 }
 
 pub fn list_launch_daemons() -> Vec<StartupItem> {
-    list_plist_dir(&system_launch_daemons(), StartupSource::MacLaunchDaemon, false)
+    list_plist_dir(
+        &system_launch_daemons(),
+        StartupSource::MacLaunchDaemon,
+        false,
+    )
 }
 
 /// shared worker. public for the orchestrator + test-on-linux.
@@ -81,21 +95,20 @@ pub fn list_plist_dir(dir: &Path, source: StartupSource, is_user: bool) -> Vec<S
         if path.extension().and_then(|e| e.to_str()) != Some("plist") {
             continue;
         }
-        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
         if !meta.file_type().is_file() {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else { continue };
-        let Some(parsed) = parse_plist(&text) else {
+        let Some(parsed) = parse_plist_file(&path) else {
             continue;
         };
 
         let name = parsed
             .label
             .clone()
-            .or_else(|| {
-                path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
-            })
+            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
             .unwrap_or_default();
         let command = parsed.command();
         let description = parsed.label.clone().unwrap_or_default();
@@ -119,7 +132,12 @@ pub fn list_plist_dir(dir: &Path, source: StartupSource, is_user: bool) -> Vec<S
             impact: impact_for_command(&command),
         });
     }
-    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+    items.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then(a.id.cmp(&b.id))
+    });
     items
 }
 
@@ -127,10 +145,10 @@ pub fn list_plist_dir(dir: &Path, source: StartupSource, is_user: bool) -> Vec<S
 
 /// flip Disabled. atomic write, preserves other keys.
 pub fn toggle_user_agent(path: &Path, enabled: bool) -> Result<(), String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("read plist: {e}"))?;
-    let new_text = rewrite_plist_disabled(&text, !enabled)
-        .ok_or_else(|| format!("plist has no <dict> body: {}", path.display()))?;
-    atomic_write(path, &new_text).map_err(|e| format!("write plist: {e}"))
+    let mut value = plist::Value::from_file(path).map_err(|e| format!("read plist: {e}"))?;
+    set_plist_disabled(&mut value, !enabled)
+        .ok_or_else(|| format!("plist has no dictionary body: {}", path.display()))?;
+    atomic_write_plist(path, &value).map_err(|e| format!("write plist: {e}"))
 }
 
 // ---------------- plist parsing ----------------
@@ -167,14 +185,78 @@ impl ParsedPlist {
     }
 }
 
-/// returns None if no <dict> (binary plists, malformed XML, wrong root). never panics.
+fn parse_plist_file(path: &Path) -> Option<ParsedPlist> {
+    let value = plist::Value::from_file(path).ok()?;
+    parse_plist_value(&value)
+}
+
+fn parse_plist_value(value: &plist::Value) -> Option<ParsedPlist> {
+    let plist::Value::Dictionary(dict) = value else {
+        return None;
+    };
+
+    let mut out = ParsedPlist::default();
+    out.label = dict.get("Label").and_then(plist_string);
+    if let Some(program) = dict.get("Program").and_then(plist_string) {
+        out.program = Some(program);
+    }
+    if let Some(args) = dict.get("ProgramArguments").and_then(plist_string_array) {
+        let mut it = args.into_iter();
+        if let Some(first) = it.next() {
+            out.program = Some(first);
+            out.args = it.collect();
+        }
+    }
+    out.disabled = dict.get("Disabled").and_then(plist_bool).unwrap_or(false);
+
+    Some(out)
+}
+
+fn plist_string(value: &plist::Value) -> Option<String> {
+    match value {
+        plist::Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn plist_bool(value: &plist::Value) -> Option<bool> {
+    match value {
+        plist::Value::Boolean(b) => Some(*b),
+        _ => None,
+    }
+}
+
+fn plist_string_array(value: &plist::Value) -> Option<Vec<String>> {
+    let plist::Value::Array(values) = value else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for value in values {
+        if let Some(s) = plist_string(value) {
+            out.push(s);
+        }
+    }
+    Some(out)
+}
+
+fn set_plist_disabled(value: &mut plist::Value, disabled: bool) -> Option<()> {
+    let plist::Value::Dictionary(dict) = value else {
+        return None;
+    };
+    dict.insert("Disabled".into(), plist::Value::Boolean(disabled));
+    Some(())
+}
+
+/// returns None if no <dict> (malformed XML, wrong root). never panics.
 /// not a general plist parser, only knows keys launch agents use. nested dicts
 /// other than EnvironmentVariables ignored gracefully.
 pub fn parse_plist(text: &str) -> Option<ParsedPlist> {
-    // bplist magic, skip. would need a real dep to parse.
-    if text.as_bytes().starts_with(b"bplist") {
-        return None;
+    if let Ok(value) = plist::Value::from_reader(Cursor::new(text.as_bytes())) {
+        if let Some(parsed) = parse_plist_value(&value) {
+            return Some(parsed);
+        }
     }
+
     let dict_start = text.find("<dict>")?;
     let dict_end = text.rfind("</dict>")?;
     if dict_end <= dict_start {
@@ -318,11 +400,7 @@ fn find_disabled_key(lower: &str, body: &str) -> Option<usize> {
     }
 }
 
-fn read_tag_body<'a>(
-    hay: &'a str,
-    abs_offset: usize,
-    tag: &str,
-) -> Option<(String, usize)> {
+fn read_tag_body<'a>(hay: &'a str, abs_offset: usize, tag: &str) -> Option<(String, usize)> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let start = abs_offset + open.len();
@@ -524,6 +602,29 @@ fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+fn atomic_write_plist(path: &Path, value: &plist::Value) -> std::io::Result<()> {
+    let mut bytes = Vec::new();
+    value
+        .to_writer_xml(&mut bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    atomic_write_bytes(path, &bytes)
+}
+
+fn atomic_write_bytes(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("launch-agent");
+    let tmp = dir.join(format!(".{file_name}.safai-tmp"));
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +635,25 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    fn write_binary_plist(path: &Path, label: &str, disabled: bool) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut dict = plist::Dictionary::new();
+        dict.insert("Label".into(), plist::Value::String(label.to_string()));
+        dict.insert(
+            "ProgramArguments".into(),
+            plist::Value::Array(vec![
+                plist::Value::String("/usr/local/bin/foo".to_string()),
+                plist::Value::String("--serve".to_string()),
+            ]),
+        );
+        dict.insert("Disabled".into(), plist::Value::Boolean(disabled));
+        let value = plist::Value::Dictionary(dict);
+        let mut file = fs::File::create(path).unwrap();
+        value.to_writer_binary(&mut file).unwrap();
     }
 
     fn sample_plist(label: &str, disabled: bool) -> String {
@@ -604,8 +724,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_plist_returns_none_on_binary_plist() {
-        // bplist00 magic, can't read, don't crash
+    fn parse_plist_returns_none_on_invalid_binary_plist() {
+        // invalid bplist00 magic, can't read, don't crash
         let bytes = b"bplist00\x01\x02\x03";
         // only need parse_plist to reject the magic-prefixed text
         let text = String::from_utf8_lossy(bytes).into_owned();
@@ -716,17 +836,18 @@ mod tests {
     }
 
     #[test]
-    fn list_plist_dir_skips_non_plist_files() {
+    fn list_plist_dir_parses_xml_and_binary_plists() {
         let dir = TempDir::new().unwrap();
         let agents = dir.path().join("Library/LaunchAgents");
         fs::create_dir_all(&agents).unwrap();
         write(&agents.join("a.plist"), &sample_plist("a", false));
         write(&agents.join("notes.txt"), "no");
-        write(&agents.join("binary.plist"), "bplist00\u{0}\u{1}");
+        write_binary_plist(&agents.join("binary.plist"), "binary.agent", true);
         let items = list_plist_dir(&agents, StartupSource::MacLaunchAgentUser, true);
-        // binary plist + notes.txt filtered, only XML one survives
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0].name, "a");
+        assert_eq!(items[1].name, "binary.agent");
+        assert!(!items[1].enabled);
     }
 
     #[cfg(unix)]
@@ -789,12 +910,30 @@ mod tests {
     }
 
     #[test]
+    fn toggle_user_agent_handles_binary_plist() {
+        let dir = TempDir::new().unwrap();
+        let agents = dir.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        let plist = agents.join("binary.plist");
+        write_binary_plist(&plist, "binary.agent", false);
+
+        toggle_user_agent(&plist, false).unwrap();
+        let items = list_plist_dir(&agents, StartupSource::MacLaunchAgentUser, true);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "binary.agent");
+        assert!(!items[0].enabled);
+    }
+
+    #[test]
     fn impact_for_launch_agent_commands() {
         let text = sample_plist("com.example.slack", false).replace(
             "/usr/local/bin/foo",
             "/Applications/Slack.app/Contents/MacOS/Slack",
         );
         let p = parse_plist(&text).unwrap();
-        assert_eq!(impact_for_command(&p.command()), super::super::types::StartupImpact::High);
+        assert_eq!(
+            impact_for_command(&p.command()),
+            super::super::types::StartupImpact::High
+        );
     }
 }

@@ -47,9 +47,9 @@ async function bootOnce(): Promise<void> {
         // subscription below will recover
       }
       try {
-        unlisten = await subscribeActivity({ onSnapshot: push });
         const h = await startActivity({});
         handleId = h.id;
+        unlisten = await subscribeActivity(h.id, { onSnapshot: push });
       } catch (e) {
         // eslint-disable-next-line no-console
         console.warn('startActivity failed', e);

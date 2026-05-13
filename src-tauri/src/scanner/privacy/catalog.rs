@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-pub use super::super::junk::catalog::Os;
 pub use super::super::junk::catalog::current_os;
+pub use super::super::junk::catalog::Os;
 
 /// kebab-case browser id. UI keys icons + copy on this. additive only,
 /// removing a variant breaks persisted selection state.
@@ -476,11 +476,7 @@ fn firefox_categories() -> Vec<PrivacyCategorySpec> {
             label: "Cookies",
             description: "Site cookies.",
             icon: "file",
-            rel_to_profile: vec![
-                "cookies.sqlite",
-                "cookies.sqlite-shm",
-                "cookies.sqlite-wal",
-            ],
+            rel_to_profile: vec!["cookies.sqlite", "cookies.sqlite-shm", "cookies.sqlite-wal"],
             rel_to_home: vec![],
         },
         PrivacyCategorySpec {
@@ -733,9 +729,14 @@ mod tests {
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
-        assert!(roots.iter().any(|p| p.contains("snap/firefox/")), "no snap root: {roots:?}");
         assert!(
-            roots.iter().any(|p| p.contains(".var/app/org.mozilla.firefox")),
+            roots.iter().any(|p| p.contains("snap/firefox/")),
+            "no snap root: {roots:?}"
+        );
+        assert!(
+            roots
+                .iter()
+                .any(|p| p.contains(".var/app/org.mozilla.firefox")),
             "no flatpak root: {roots:?}",
         );
         assert!(
@@ -754,7 +755,9 @@ mod tests {
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
         assert!(roots.iter().any(|p| p.contains("snap/chromium")));
-        assert!(roots.iter().any(|p| p.contains(".var/app/org.chromium.Chromium")));
+        assert!(roots
+            .iter()
+            .any(|p| p.contains(".var/app/org.chromium.Chromium")));
 
         let brave = cat.iter().find(|b| b.id == BrowserId::Brave).unwrap();
         assert!(
@@ -810,8 +813,7 @@ mod tests {
     fn every_browser_has_all_five_categories() {
         for os in [Os::Mac, Os::Linux, Os::Windows] {
             for b in catalog_for(os, &home()) {
-                let ids: HashSet<PrivacyCategoryId> =
-                    b.categories.iter().map(|c| c.id).collect();
+                let ids: HashSet<PrivacyCategoryId> = b.categories.iter().map(|c| c.id).collect();
                 for want in [
                     PrivacyCategoryId::Cache,
                     PrivacyCategoryId::Cookies,
@@ -819,11 +821,7 @@ mod tests {
                     PrivacyCategoryId::Sessions,
                     PrivacyCategoryId::LocalStorage,
                 ] {
-                    assert!(
-                        ids.contains(&want),
-                        "{os:?} {:?} missing {want:?}",
-                        b.id,
-                    );
+                    assert!(ids.contains(&want), "{os:?} {:?} missing {want:?}", b.id,);
                 }
             }
         }
@@ -833,8 +831,7 @@ mod tests {
     fn category_ids_are_unique_within_a_browser() {
         for os in [Os::Mac, Os::Linux, Os::Windows] {
             for b in catalog_for(os, &home()) {
-                let set: HashSet<PrivacyCategoryId> =
-                    b.categories.iter().map(|c| c.id).collect();
+                let set: HashSet<PrivacyCategoryId> = b.categories.iter().map(|c| c.id).collect();
                 assert_eq!(set.len(), b.categories.len(), "{os:?} {:?} dup", b.id);
             }
         }

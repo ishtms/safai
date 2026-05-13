@@ -42,6 +42,19 @@ jwalk = "0.8"
 # (includes `std` + SIMD autodetect).
 rayon = "1.10"
 blake3 = "1.5"
+# platform path discovery. Used at the command boundary so state and
+# graveyard files land in OS app-data locations without hand-rolling HOME.
+dirs = "6.0"
+# macOS launchd plists may be XML or binary.
+plist = "1.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Gatekeeper quarantine state lives in com.apple.quarantine.
+xattr = "1.6"
+
+[target.'cfg(windows)'.dependencies]
+# HKCU/HKLM Run-key startup enumeration and per-user toggles.
+winreg = "0.55"
 
 [dev-dependencies]
 tempfile = "3"
@@ -50,5 +63,5 @@ tempfile = "3"
 panic = "abort"
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = 3
 strip = true

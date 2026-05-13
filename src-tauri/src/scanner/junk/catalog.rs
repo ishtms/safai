@@ -117,7 +117,8 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
             JunkCategorySpec {
                 id: JunkCategoryId::UserCaches,
                 label: "User caches",
-                description: "Per-app caches under ~/Library/Caches. Apps regenerate these on next launch.",
+                description:
+                    "Per-app caches under ~/Library/Caches. Apps regenerate these on next launch.",
                 icon: "broom",
                 hot: false,
                 paths: vec![h("Library/Caches")],
@@ -125,7 +126,8 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
             JunkCategorySpec {
                 id: JunkCategoryId::SystemLogs,
                 label: "System logs",
-                description: "User-scope app logs. Rotate on their own; safe to clear between sessions.",
+                description:
+                    "User-scope app logs. Rotate on their own; safe to clear between sessions.",
                 icon: "file",
                 hot: false,
                 paths: vec![h("Library/Logs")],
@@ -160,10 +162,7 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
                 description: "Downloaded crate sources. Cargo re-fetches as needed.",
                 icon: "archive",
                 hot: false,
-                paths: vec![
-                    h(".cargo/registry/cache"),
-                    h(".cargo/registry/src"),
-                ],
+                paths: vec![h(".cargo/registry/cache"), h(".cargo/registry/src")],
             },
             JunkCategorySpec {
                 id: JunkCategoryId::GoModCache,
@@ -229,10 +228,7 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
                 description: "Downloaded crate sources. Cargo re-fetches as needed.",
                 icon: "archive",
                 hot: false,
-                paths: vec![
-                    h(".cargo/registry/cache"),
-                    h(".cargo/registry/src"),
-                ],
+                paths: vec![h(".cargo/registry/cache"), h(".cargo/registry/src")],
             },
             JunkCategorySpec {
                 id: JunkCategoryId::GoModCache,
@@ -290,10 +286,7 @@ pub fn catalog_for(os: Os, home: &Path) -> Vec<JunkCategorySpec> {
                 description: "Downloaded crate sources. Cargo re-fetches as needed.",
                 icon: "archive",
                 hot: false,
-                paths: vec![
-                    h(".cargo/registry/cache"),
-                    h(".cargo/registry/src"),
-                ],
+                paths: vec![h(".cargo/registry/cache"), h(".cargo/registry/src")],
             },
         ],
     }
@@ -369,7 +362,8 @@ mod tests {
         }
         // need at least one temp-files entry
         assert!(
-            cat.iter().any(|c| matches!(c.id, JunkCategoryId::TempFiles)),
+            cat.iter()
+                .any(|c| matches!(c.id, JunkCategoryId::TempFiles)),
             "windows catalog missing Temp files",
         );
     }

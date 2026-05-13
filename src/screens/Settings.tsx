@@ -27,6 +27,7 @@ import {
   updateSettings,
   type SettingsBundle,
 } from '../lib/settings';
+import { invalidateFilesystemCachesSoon } from '../lib/cacheInvalidation';
 
 type Tab = 'general' | 'scanning' | 'privacy' | 'about';
 
@@ -83,6 +84,7 @@ export default function Settings(): JSX.Element {
     try {
       const updated = await updateSettings(d.prefs, d.telemetryOptIn);
       syncDraft(updated);
+      invalidateFilesystemCachesSoon();
       setStatus({ kind: 'ok', text: 'Saved.' });
     } catch (e) {
       setStatus({ kind: 'err', text: String((e as Error)?.message ?? e) });
@@ -96,6 +98,7 @@ export default function Settings(): JSX.Element {
     try {
       const updated = await resetPrefs();
       syncDraft(updated);
+      invalidateFilesystemCachesSoon();
       setStatus({ kind: 'ok', text: 'Preferences reset to defaults.' });
     } catch (e) {
       setStatus({ kind: 'err', text: String((e as Error)?.message ?? e) });

@@ -187,9 +187,13 @@ mod tests {
     // has both posix and C:\ entries.
     fn abs(unix_style: &str) -> PathBuf {
         #[cfg(windows)]
-        { PathBuf::from(format!("C:{unix_style}")) }
+        {
+            PathBuf::from(format!("C:{unix_style}"))
+        }
         #[cfg(not(windows))]
-        { PathBuf::from(unix_style) }
+        {
+            PathBuf::from(unix_style)
+        }
     }
 
     fn home_of(name: &str) -> PathBuf {

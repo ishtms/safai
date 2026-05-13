@@ -5,6 +5,7 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
 } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
@@ -12,13 +13,14 @@ import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
 import { Icon, type IconName } from '../components/Icon';
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal';
+import { CacheFreshness } from '../components/CacheFreshness';
 import {
   junkScan,
   type JunkCategoryReport,
   type JunkPathDetail,
   type JunkReport,
 } from '../lib/junk';
-import { KEY_JUNK, sharedResource } from '../lib/scanCache';
+import { CACHE_JUNK, KEY_JUNK, sharedResource } from '../lib/scanCache';
 import {
   commitDelete,
   graveyardStats,
@@ -29,6 +31,7 @@ import {
   type DeleteResult,
   type GraveyardStats,
 } from '../lib/cleaner';
+import { invalidateFilesystemCachesSoon } from '../lib/cacheInvalidation';
 import { formatBytes, formatCount, formatRelativeTime, truncateMiddle } from '../lib/format';
 import { useFlashMood } from '../lib/moods';
 import type { SudsMood } from '../components/Suds';
@@ -38,7 +41,7 @@ import type { SudsMood } from '../components/Suds';
 export default function Junk() {
   // shared cache so tab-switching doesn't re-run the scan. rescan button
   // still forces a fresh fetch via refetch()
-  const [report, { refetch }] = sharedResource(KEY_JUNK, junkScan);
+  const [report, { refetch }] = sharedResource(CACHE_JUNK, junkScan);
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set(['user-caches']));
   const [focusedPath, setFocusedPath] = createSignal<{ cat: JunkCategoryReport; row: JunkPathDetail } | null>(null);
   const navigate = useNavigate();
@@ -52,8 +55,10 @@ export default function Junk() {
   // drives relative timestamp re-renders. 250ms is snappy without burning
   // cycles idle
   const [clock, setClock] = createSignal(Date.now());
-  const clockTick = setInterval(() => setClock(Date.now()), 250);
-  onCleanup(() => clearInterval(clockTick));
+  onMount(() => {
+    const clockTick = window.setInterval(() => setClock(Date.now()), 250);
+    onCleanup(() => window.clearInterval(clockTick));
+  });
 
   // rescan routes through the shared /scanning progress screen rather than
   // a silent refetch. ?kind=junk makes it run junk_scan then nav back here,
@@ -124,6 +129,8 @@ export default function Junk() {
           r.purged.length,
         )} batch${r.purged.length === 1 ? '' : 'es'}.`,
       );
+      invalidateFilesystemCachesSoon(KEY_JUNK);
+      refetch();
     } catch (e) {
       setRestoreMessage(`Couldn't empty trash: ${String(e)}`);
     } finally {
@@ -169,6 +176,7 @@ export default function Junk() {
       setCommitResult(result);
       setPendingPlan(null);
       sudsMood.flash();
+      invalidateFilesystemCachesSoon(KEY_JUNK);
       // rescan so emptied cats drop to zero
       refetch();
       refetchStats();
@@ -194,6 +202,7 @@ export default function Junk() {
             )}).`,
       );
       if (n > 0) sudsMood.flash();
+      invalidateFilesystemCachesSoon(KEY_JUNK);
       refetch();
       refetchStats();
     } catch (e) {
@@ -328,6 +337,13 @@ export default function Junk() {
                   <span>{formatCount(r().totalItems)} items catalogued</span>
                   <span>·</span>
                   <span>Platform: {r().platform}</span>
+                  <span>·</span>
+                  <CacheFreshness
+                    cacheKey={CACHE_JUNK}
+                    version={r()}
+                    disabled={isBusy()}
+                    onRescan={doRescan}
+                  />
                   <Show when={(stats()?.batchCount ?? 0) > 0}>
                     <span>·</span>
                     <span>

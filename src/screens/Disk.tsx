@@ -1,21 +1,22 @@
-import { createMemo, createResource, createSignal, For, onCleanup, Show } from 'solid-js';
+import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
 import { Icon } from '../components/Icon';
 import {
+  invalidateTreemapCache,
   cancelTreemap,
   forgetTreemap,
-  invalidateTreemapCache,
   serveTreemapSubtree,
   startTreemap,
   subscribeTreemap,
   tileColor,
+  treemapSnapshot,
   type BiggestFolder,
   type TreemapResponse,
   type TreemapTile,
 } from '../lib/treemap';
 import { listVolumes, pickPrimary, type Volume } from '../lib/volumes';
-import { formatBytes, formatCount, splitBytes } from '../lib/format';
+import { formatBytes, formatCount, formatRelativeTime, splitBytes } from '../lib/format';
 import {
   fetchPermissionStatus,
   openPermissionSettings,
@@ -45,43 +46,73 @@ export default function Disk() {
   // entries with status unknown and we hide the CTA anyway
   const [permStatus] = createResource(fetchPermissionStatus);
 
-  let currentHandle: string | null = null;
   let unsubscribe: (() => void) | null = null;
+  let activeHandleId: string | null = null;
+  let disposed = false;
+
+  const finishWalk = (id: string, r: TreemapResponse) => {
+    if (activeHandleId !== id) return;
+    activeHandleId = null;
+    setResponse(r);
+    setScanning(false);
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    void forgetTreemap(id);
+  };
 
   const startWalk = async (root: string | undefined) => {
-    await stopWalk();
+    if (disposed) return;
+    await detachWalk(true);
+    if (disposed) return;
     setError(null);
     setScanning(true);
 
     try {
-      unsubscribe = await subscribeTreemap({
-        onProgress: (r) => setResponse(r),
-        onDone: (r) => {
-          setResponse(r);
-          setScanning(false);
-        },
-      });
       const handle = await startTreemap({ root, depth: 4 });
-      currentHandle = handle.id;
+      if (disposed) {
+        await cancelTreemap(handle.id).catch(() => {});
+        await forgetTreemap(handle.id).catch(() => {});
+        return;
+      }
+      activeHandleId = handle.id;
+      const nextUnsubscribe = await subscribeTreemap(handle.id, {
+        onProgress: (r) => {
+          if (disposed) return;
+          if (activeHandleId === handle.id) setResponse(r);
+        },
+        onDone: (r) => finishWalk(handle.id, r),
+      });
+      if (disposed || activeHandleId !== handle.id) {
+        nextUnsubscribe();
+        if (disposed) {
+          activeHandleId = null;
+          await cancelTreemap(handle.id).catch(() => {});
+          await forgetTreemap(handle.id).catch(() => {});
+        }
+        return;
+      }
+      unsubscribe = nextUnsubscribe;
+      const terminal = await treemapSnapshot(handle.id);
+      if (!disposed && terminal) finishWalk(handle.id, terminal);
     } catch (e) {
+      if (disposed) return;
       setError(String(e));
       setScanning(false);
     }
   };
 
-  const stopWalk = async () => {
-    if (currentHandle) {
-      try {
-        await cancelTreemap(currentHandle);
-        await forgetTreemap(currentHandle);
-      } catch {
-        // best-effort
-      }
-      currentHandle = null;
-    }
+  const detachWalk = async (cancelActive: boolean = false): Promise<void> => {
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
+    }
+    if (cancelActive && activeHandleId) {
+      const id = activeHandleId;
+      activeHandleId = null;
+      await cancelTreemap(id).catch(() => {});
+      await forgetTreemap(id).catch(() => {});
     }
   };
 
@@ -89,12 +120,14 @@ export default function Disk() {
   // the cache on done so drill/back hits next time. this is what fixes
   // "it rescans when i go back to Home"
   const navigateTo = async (root: string | undefined) => {
+    if (disposed) return;
     try {
       const cached = await serveTreemapSubtree(root);
+      if (disposed) return;
       if (cached) {
         // kill any in-flight walk, its emit_done would clobber the cached
         // response with older/wider state
-        await stopWalk();
+        await detachWalk(true);
         setError(null);
         setResponse(cached);
         setScanning(false);
@@ -107,10 +140,13 @@ export default function Disk() {
   };
 
   // first mount misses by definition, later mounts hit
-  void navigateTo(undefined);
+  onMount(() => {
+    void navigateTo(undefined);
+  });
 
   onCleanup(() => {
-    void stopWalk();
+    disposed = true;
+    void detachWalk(true);
   });
 
   const drillInto = async (tile: TreemapTile) => {
@@ -140,6 +176,7 @@ export default function Disk() {
   // user-clicked rescan. nuke rust cache first so the fresh walk isn't
   // short-circuited, then restart from current root
   const rescan = async () => {
+    if (scanning()) return;
     try {
       await invalidateTreemapCache();
     } catch {
@@ -645,7 +682,9 @@ function TreemapCanvas(props: {
         <Show when={props.response}>
           {(r) => (
             <div style={{ 'font-size': '10px', color: 'var(--safai-fg-3)' }}>
-              {props.scanning ? 'scanning…' : `scanned in ${r().durationMs}ms`}
+              {props.scanning
+                ? 'scanning…'
+                : `scanned ${formatRelativeTime(r().scannedAt, Date.now())} in ${r().durationMs}ms`}
             </div>
           )}
         </Show>

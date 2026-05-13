@@ -36,10 +36,10 @@ pub mod types;
 pub use kill::kill_pid;
 #[allow(unused_imports)]
 pub use kill::{is_protected_pid, KillError};
-pub use sample::{sample as sample_activity, SysinfoProbe, SystemProbe};
+pub use sample::{retop_snapshot, sample as sample_activity, SysinfoProbe};
 pub use stream::{
-    next_activity_handle_id, run_activity_stream, ActivityController, ActivityEmit,
-    ActivityHandle, ActivityRegistry, DEFAULT_TOP_N, MIN_INTERVAL_MS,
+    next_activity_handle_id, run_activity_stream, ActivityController, ActivityEmit, ActivityHandle,
+    ActivityInsert, ActivityRegistry, DEFAULT_TOP_N,
 };
 #[allow(unused_imports)]
 pub use stream::{DEFAULT_INTERVAL_MS, MAX_INTERVAL_MS};

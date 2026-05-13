@@ -26,6 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::scanner::dupes::IGNORED_DIR_NAMES;
+use crate::scanner::fs_guard;
 
 /// progress points. streaming wrapper bridges to `large-old://progress`.
 /// sync entry point passes None.
@@ -131,9 +132,7 @@ impl TopN {
         if self.heap.len() < self.cap {
             self.heap.push(std::cmp::Reverse(item));
         } else if let Some(std::cmp::Reverse(min)) = self.heap.peek() {
-            if item.bytes > min.bytes
-                || (item.bytes == min.bytes && item.path < min.path)
-            {
+            if item.bytes > min.bytes || (item.bytes == min.bytes && item.path < min.path) {
                 self.heap.pop();
                 self.heap.push(std::cmp::Reverse(item));
             }
@@ -172,16 +171,24 @@ pub fn find_large_old(
 
     let min_idle_secs = min_days_idle.saturating_mul(86_400);
 
+    let root_dev = fs_guard::root_device_id(root);
     let walker = jwalk::WalkDir::new(root)
         .skip_hidden(false)
         .follow_links(false)
-        .process_read_dir(|_d, _p, _s, children| {
+        .process_read_dir(move |_d, _p, _s, children| {
             children.retain(|res| match res {
                 Ok(entry) => {
                     let name = entry.file_name();
-                    !IGNORED_DIR_NAMES
+                    if IGNORED_DIR_NAMES
                         .iter()
                         .any(|ignored| name == std::ffi::OsStr::new(ignored))
+                    {
+                        return false;
+                    }
+                    match entry.metadata() {
+                        Ok(meta) => fs_guard::is_on_root_device(root_dev, &meta),
+                        Err(_) => true,
+                    }
                 }
                 Err(_) => true,
             });
@@ -385,7 +392,10 @@ mod tests {
         let v = t.into_sorted_vec();
         assert_eq!(v.len(), 2);
         // two of {a, m, z}, 'a' must always be kept
-        let paths: Vec<String> = v.iter().map(|i| i.path.to_string_lossy().to_string()).collect();
+        let paths: Vec<String> = v
+            .iter()
+            .map(|i| i.path.to_string_lossy().to_string())
+            .collect();
         assert!(paths.contains(&"/a".to_string()));
     }
 
@@ -393,7 +403,12 @@ mod tests {
     fn cancellation_flag_drops_partial_results() {
         let tmp = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            write_aged(tmp.path(), &format!("a{i}.bin"), &vec![0u8; 4096], 365 * 86400);
+            write_aged(
+                tmp.path(),
+                &format!("a{i}.bin"),
+                &vec![0u8; 4096],
+                365 * 86400,
+            );
         }
         let flag = Arc::new(AtomicBool::new(true));
         let (rows, matched, bytes, _scanned) = find_large_old(
@@ -422,16 +437,7 @@ mod tests {
                 counter_cb.fetch_add(1, Ordering::Relaxed);
             }
         };
-        find_large_old(
-            tmp.path(),
-            1024,
-            30,
-            1000,
-            now_unix_secs(),
-            None,
-            Some(&cb),
-        )
-        .unwrap();
+        find_large_old(tmp.path(), 1024, 30, 1000, now_unix_secs(), None, Some(&cb)).unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
@@ -439,16 +445,8 @@ mod tests {
     fn extension_extraction_lowercases() {
         let tmp = tempfile::tempdir().unwrap();
         write_aged(tmp.path(), "movie.MP4", &vec![0u8; 4096], 365 * 86400);
-        let (rows, _, _, _) = find_large_old(
-            tmp.path(),
-            1024,
-            30,
-            1000,
-            now_unix_secs(),
-            None,
-            None,
-        )
-        .unwrap();
+        let (rows, _, _, _) =
+            find_large_old(tmp.path(), 1024, 30, 1000, now_unix_secs(), None, None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].extension, "mp4");
     }
@@ -466,16 +464,8 @@ mod tests {
         handle
             .set_modified(SystemTime::now() + std::time::Duration::from_secs(86_400))
             .unwrap();
-        let (rows, _, _, _) = find_large_old(
-            tmp.path(),
-            1024,
-            1,
-            1000,
-            now_unix_secs(),
-            None,
-            None,
-        )
-        .unwrap();
+        let (rows, _, _, _) =
+            find_large_old(tmp.path(), 1024, 1, 1000, now_unix_secs(), None, None).unwrap();
         assert!(rows.is_empty());
     }
 
@@ -490,16 +480,8 @@ mod tests {
                 365 * 86400,
             );
         }
-        let (rows, matched, bytes, _) = find_large_old(
-            tmp.path(),
-            1024,
-            30,
-            3,
-            now_unix_secs(),
-            None,
-            None,
-        )
-        .unwrap();
+        let (rows, matched, bytes, _) =
+            find_large_old(tmp.path(), 1024, 30, 3, now_unix_secs(), None, None).unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(matched, 10);
         // bytes >= sum of 10 files, must exceed visible sum
@@ -520,16 +502,8 @@ mod tests {
     fn builds_absolute_paths_lossy_utf8() {
         let tmp = tempfile::tempdir().unwrap();
         write_aged(tmp.path(), "dir/a.bin", &vec![0u8; 4096], 365 * 86400);
-        let (rows, _, _, _) = find_large_old(
-            tmp.path(),
-            1024,
-            30,
-            1000,
-            now_unix_secs(),
-            None,
-            None,
-        )
-        .unwrap();
+        let (rows, _, _, _) =
+            find_large_old(tmp.path(), 1024, 30, 1000, now_unix_secs(), None, None).unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].path.ends_with("a.bin"));
         assert!(Path::new(&rows[0].path).is_absolute());
@@ -587,16 +561,8 @@ mod tests {
                 .unwrap();
         }
         let started = std::time::Instant::now();
-        let (rows, matched, _, _) = find_large_old(
-            tmp.path(),
-            1024,
-            30,
-            500,
-            now_unix_secs(),
-            None,
-            None,
-        )
-        .unwrap();
+        let (rows, matched, _, _) =
+            find_large_old(tmp.path(), 1024, 30, 500, now_unix_secs(), None, None).unwrap();
         let elapsed = started.elapsed();
         assert_eq!(rows.len(), 500);
         assert_eq!(matched, 5_000);

@@ -7,6 +7,9 @@ mod volumes;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    configure_linux_webview_env();
+    scanner::work_budget::configure_global_rayon_pool();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         // auto-updater. desktop-only, no-op on mobile. JS
@@ -20,9 +23,6 @@ pub fn run() {
         .manage(scanner::run::ScanRegistry::new())
         // most recent completed scan totals, read by smart_scan_summary
         .manage(scanner::LastScanStore::new())
-        // cleaner, one per process, plan cache + audit log
-        // live for window lifetime
-        .manage(commands::build_cleaner())
         // streaming treemap registry
         .manage(scanner::treemap::TreemapRegistry::new())
         // followup, in-memory cache of completed treemaps.
@@ -46,7 +46,13 @@ pub fn run() {
         .setup(|app| {
             use tauri::Manager;
             let app_handle = app.handle().clone();
-            let sched = commands::spawn_scheduler(app_handle);
+            let onboarding_store =
+                std::sync::Arc::new(onboarding::OnboardingStore::new(commands::safai_data_dir()));
+            app.manage(onboarding_store.clone());
+            let cleaner = commands::build_cleaner(&app_handle)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
+            app.manage(cleaner);
+            let sched = commands::spawn_scheduler(app_handle, onboarding_store);
             app.manage(sched);
             Ok(())
         })
@@ -71,20 +77,24 @@ pub fn run() {
             commands::start_treemap,
             commands::cancel_treemap,
             commands::forget_treemap,
+            commands::treemap_snapshot,
             commands::serve_treemap_subtree,
             commands::invalidate_treemap_cache,
             commands::find_duplicates,
             commands::start_duplicates,
             commands::cancel_duplicates,
             commands::forget_duplicates,
+            commands::duplicates_snapshot,
             commands::find_large_old,
             commands::start_large_old,
             commands::cancel_large_old,
             commands::forget_large_old,
+            commands::large_old_snapshot,
             commands::reveal_in_file_manager,
             commands::startup_scan,
             commands::startup_toggle,
             commands::activity_sample,
+            commands::activity_process_detail,
             commands::start_activity,
             commands::refresh_activity,
             commands::set_activity_interval,
@@ -95,6 +105,7 @@ pub fn run() {
             commands::start_malware,
             commands::cancel_malware,
             commands::forget_malware,
+            commands::malware_snapshot,
             commands::onboarding_state,
             commands::onboarding_save_prefs,
             commands::onboarding_set_step,
@@ -113,3 +124,15 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running Safai");
 }
+
+#[cfg(target_os = "linux")]
+fn configure_linux_webview_env() {
+    // Avoid WebKitGTK's DMABuf path on drivers/compositors that reject
+    // the initial GBM surface allocation. Respect an explicit user override.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_linux_webview_env() {}

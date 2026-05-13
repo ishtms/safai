@@ -10,11 +10,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::onboarding::storage;
-use crate::onboarding::types::{OnboardingState, ScheduleCadence};
+use crate::onboarding::types::{OnboardingError, OnboardingState, ScheduleCadence};
+use crate::onboarding::OnboardingStore;
 
 use super::cadence::{cadence_interval_secs, compute_next_due, NextDue, SECS_PER_DAY};
 
@@ -42,6 +43,56 @@ impl Clock for SystemClock {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
+    }
+}
+
+pub trait SchedulerStateStore {
+    fn access_state<F, R>(&self, access: F) -> Result<R, OnboardingError>
+    where
+        F: FnOnce(&mut OnboardingState) -> (R, bool);
+}
+
+impl SchedulerStateStore for &Path {
+    fn access_state<F, R>(&self, access: F) -> Result<R, OnboardingError>
+    where
+        F: FnOnce(&mut OnboardingState) -> (R, bool),
+    {
+        let mut state = storage::load_or_default(self);
+        let (result, should_save) = access(&mut state);
+        if should_save {
+            storage::save(self, &state)?;
+        }
+        Ok(result)
+    }
+}
+
+impl SchedulerStateStore for PathBuf {
+    fn access_state<F, R>(&self, access: F) -> Result<R, OnboardingError>
+    where
+        F: FnOnce(&mut OnboardingState) -> (R, bool),
+    {
+        self.as_path().access_state(access)
+    }
+}
+
+impl SchedulerStateStore for Arc<OnboardingStore> {
+    fn access_state<F, R>(&self, access: F) -> Result<R, OnboardingError>
+    where
+        F: FnOnce(&mut OnboardingState) -> (R, bool),
+    {
+        self.access(access)
+    }
+}
+
+impl<T> SchedulerStateStore for &T
+where
+    T: SchedulerStateStore + ?Sized,
+{
+    fn access_state<F, R>(&self, access: F) -> Result<R, OnboardingError>
+    where
+        F: FnOnce(&mut OnboardingState) -> (R, bool),
+    {
+        (**self).access_state(access)
     }
 }
 
@@ -123,60 +174,69 @@ impl SchedulerController {
 ///
 /// persist failures log + swallow. scheduler must keep ticking even
 /// when the state file is briefly unwritable.
-pub fn tick<F>(
-    data_dir: &Path,
+pub fn tick<S, F>(
+    state_store: S,
     ctrl: &SchedulerController,
     clock: &dyn Clock,
     fire: F,
 ) -> Duration
 where
+    S: SchedulerStateStore,
     F: FnOnce(),
 {
     let cadence = ctrl.cadence();
     let now = clock.now_secs();
-    let mut state = storage::load_or_default(data_dir);
 
-    let decision = compute_next_due(cadence, state.last_scheduled_at, now);
-
-    let sleep_secs = match decision {
-        NextDue::Idle => IDLE_SLEEP_SECS,
-        NextDue::AnchorAndWait(interval) => {
-            state.last_scheduled_at = Some(now);
-            persist(data_dir, &state);
-            interval
+    let mut fire = Some(fire);
+    let mut planned_sleep_secs = IDLE_SLEEP_SECS;
+    let sleep_secs = match state_store.access_state(|state| {
+        let decision = compute_next_due(cadence, state.last_scheduled_at, now);
+        let out = match decision {
+            NextDue::Idle => (IDLE_SLEEP_SECS, false),
+            NextDue::AnchorAndWait(interval) => {
+                state.last_scheduled_at = Some(now);
+                (interval, true)
+            }
+            NextDue::Overdue => {
+                if let Some(fire) = fire.take() {
+                    fire();
+                }
+                state.last_scheduled_at = Some(now);
+                // Overdue implies cadence Some, sleep a full interval
+                (
+                    cadence.map(cadence_interval_secs).unwrap_or(SECS_PER_DAY),
+                    true,
+                )
+            }
+            NextDue::In(s) => (s, false),
+        };
+        planned_sleep_secs = out.0;
+        out
+    }) {
+        Ok(secs) => secs,
+        Err(e) => {
+            eprintln!("[safai] scheduler state save failed (non-fatal): {e}");
+            planned_sleep_secs
         }
-        NextDue::Overdue => {
-            fire();
-            state.last_scheduled_at = Some(now);
-            persist(data_dir, &state);
-            // Overdue implies cadence Some, sleep a full interval
-            cadence.map(cadence_interval_secs).unwrap_or(SECS_PER_DAY)
-        }
-        NextDue::In(s) => s,
     };
 
     // clamp so hibernation / spurious wakes can't defer by days
     Duration::from_secs(sleep_secs.min(MAX_SLEEP_SECS).max(1))
 }
 
-fn persist(data_dir: &Path, state: &OnboardingState) {
-    if let Err(e) = storage::save(data_dir, state) {
-        eprintln!("[safai] scheduler state save failed (non-fatal): {e}");
-    }
-}
-
 /// runs until cancel. blocks, spawn on a dedicated thread.
-pub fn run_scheduler_loop<C, F>(
-    data_dir: PathBuf,
-    ctrl: std::sync::Arc<SchedulerController>,
+pub fn run_scheduler_loop<S, C, F>(
+    state_store: S,
+    ctrl: Arc<SchedulerController>,
     clock: C,
     fire: F,
 ) where
+    S: SchedulerStateStore + Send + 'static,
     C: Clock + 'static,
     F: Fn() + Send + Sync + 'static,
 {
     while !ctrl.is_cancelled() {
-        let sleep = tick(&data_dir, &ctrl, &clock, || fire());
+        let sleep = tick(&state_store, &ctrl, &clock, || fire());
         if ctrl.is_cancelled() {
             break;
         }

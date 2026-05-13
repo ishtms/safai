@@ -8,6 +8,7 @@
 
 import { invoke, listen } from './ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import { createEnvelopeGate, type IpcEventEnvelope } from './events';
 
 export type CategoryId =
   | 'system-junk'
@@ -136,21 +137,26 @@ export async function subscribeScan(
   subs: ScanSubscriptions,
 ): Promise<UnlistenFn> {
   const unlisteners: UnlistenFn[] = [];
+  const accept = createEnvelopeGate(handleId);
   if (subs.onEvent) {
     unlisteners.push(
-      await listen<ScanEvent>(CHANNEL_EVENT, (ev) => {
-        if (ev.handleId === handleId) subs.onEvent!(ev);
+      await listen<IpcEventEnvelope<ScanEvent>>(CHANNEL_EVENT, (ev) => {
+        accept(ev, (payload) => subs.onEvent!(payload));
       }),
     );
   }
   if (subs.onProgress) {
     unlisteners.push(
-      await listen<ScanProgress>(CHANNEL_PROGRESS, (p) => subs.onProgress!(p)),
+      await listen<IpcEventEnvelope<ScanProgress>>(CHANNEL_PROGRESS, (ev) => {
+        accept(ev, (payload) => subs.onProgress!(payload));
+      }),
     );
   }
   if (subs.onDone) {
     unlisteners.push(
-      await listen<ScanProgress>(CHANNEL_DONE, (p) => subs.onDone!(p)),
+      await listen<IpcEventEnvelope<ScanProgress>>(CHANNEL_DONE, (ev) => {
+        accept(ev, (payload) => subs.onDone!(payload));
+      }),
     );
   }
   return () => {

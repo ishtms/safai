@@ -28,7 +28,6 @@ import { NAV, FALLBACK_PATH, type NavItem } from './lib/nav';
 import type { OS } from './components/OSChip';
 import { getOnboardingState, type OnboardingStep } from './lib/onboarding';
 import { onSchedulerFired } from './lib/settings';
-import { startScan } from './lib/scanner';
 import { Suds } from './components/Suds';
 import { UpdateBanner } from './components/UpdateBanner';
 
@@ -40,16 +39,11 @@ function Shell(props: RouteSectionProps): JSX.Element {
   onMount(async () => setOS(await detectOS()));
 
   // subscribe to scheduler-fired events once per shell mount. rust
-  // scheduler emits when cadence elapses, we start a scan + route to
-  // /scanning. swallow on failure (e.g. no tauri) so shell keeps working
+  // scheduler emits when cadence elapses, we route to /scanning and let
+  // the scanning screen attach to the single active smart-scan handle.
   onMount(async () => {
     const unlisten = await onSchedulerFired(async () => {
-      try {
-        await startScan();
-        navigate('/scanning');
-      } catch {
-        // scheduler fired but no scanner available, nothing to do
-      }
+      navigate('/scanning');
     });
     onCleanup(unlisten);
   });

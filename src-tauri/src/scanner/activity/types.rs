@@ -77,7 +77,15 @@ impl CpuSnapshot {
     pub fn from_per_core(per_core: Vec<f32>) -> Self {
         let cleaned: Vec<f32> = per_core
             .into_iter()
-            .map(|v| if v < 0.0 { 0.0 } else if v > 100.0 { 100.0 } else { v })
+            .map(|v| {
+                if v < 0.0 {
+                    0.0
+                } else if v > 100.0 {
+                    100.0
+                } else {
+                    v
+                }
+            })
             .collect();
         let core_count = cleaned.len();
         let avg = if core_count == 0 {

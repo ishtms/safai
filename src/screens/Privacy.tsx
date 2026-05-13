@@ -4,12 +4,14 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
 } from 'solid-js';
 import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
 import { Icon, type IconName } from '../components/Icon';
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal';
+import { CacheFreshness } from '../components/CacheFreshness';
 import {
   privacyScan,
   selectedPathsFor,
@@ -17,7 +19,7 @@ import {
   type PrivacyCategoryReport,
   type PrivacyReport,
 } from '../lib/privacy';
-import { KEY_PRIVACY, sharedResource } from '../lib/scanCache';
+import { CACHE_PRIVACY, KEY_PRIVACY, sharedResource } from '../lib/scanCache';
 import {
   commitDelete,
   previewDelete,
@@ -25,6 +27,7 @@ import {
   type DeletePlan,
   type DeleteResult,
 } from '../lib/cleaner';
+import { invalidateFilesystemCachesSoon } from '../lib/cacheInvalidation';
 import { formatBytes, formatCount, formatRelativeTime } from '../lib/format';
 
 // privacy cleaner. one card per installed browser, expands to a per-category
@@ -32,13 +35,15 @@ import { formatBytes, formatCount, formatRelativeTime } from '../lib/format';
 // chrome history but keeping firefox's works. cleans via the shared cleaner
 // (preview -> confirm -> commit), restore last same as Junk.
 export default function Privacy() {
-  const [report, { refetch }] = sharedResource(KEY_PRIVACY, privacyScan);
+  const [report, { refetch }] = sharedResource(CACHE_PRIVACY, privacyScan);
 
   // drives "last scanned Xs ago" + the feedback latch below. 250ms is
   // snappy enough for a visible release
   const [clock, setClock] = createSignal(Date.now());
-  const tick = setInterval(() => setClock(Date.now()), 250);
-  onCleanup(() => clearInterval(tick));
+  onMount(() => {
+    const tick = window.setInterval(() => setClock(Date.now()), 250);
+    onCleanup(() => window.clearInterval(tick));
+  });
 
   // min-visible scan state so a sub-100ms rescan still registers (same
   // trick as Junk)
@@ -143,6 +148,7 @@ export default function Privacy() {
       const result = await commitDelete(plan.token);
       setCommitResult(result);
       setPendingPlan(null);
+      invalidateFilesystemCachesSoon(KEY_PRIVACY);
       refetch();
     } catch (e) {
       setPlanError(String(e));
@@ -163,6 +169,7 @@ export default function Privacy() {
           ? 'Nothing to restore.'
           : `Restored ${formatCount(n)} item${n === 1 ? '' : 's'} (${formatBytes(r.bytesRestored)}).`,
       );
+      invalidateFilesystemCachesSoon(KEY_PRIVACY);
       refetch();
     } catch (e) {
       setRestoreMsg(`Couldn't restore: ${String(e)}`);
@@ -304,6 +311,13 @@ export default function Privacy() {
                   <span>{availableBrowsers().length} browser{availableBrowsers().length === 1 ? '' : 's'} found</span>
                   <span>·</span>
                   <span>Platform: {r().platform}</span>
+                  <span>·</span>
+                  <CacheFreshness
+                    cacheKey={CACHE_PRIVACY}
+                    version={r()}
+                    disabled={isBusy()}
+                    onRescan={doRescan}
+                  />
                 </div>
               )}
             </Show>

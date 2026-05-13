@@ -5,15 +5,19 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
 } from 'solid-js';
 import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
 import { Icon } from '../components/Icon';
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal';
+import { CacheFreshness } from '../components/CacheFreshness';
 import {
   autoKeepOriginal,
   cancelDuplicates,
+  DEFAULT_MIN_BYTES,
+  duplicatesSnapshot,
   forgetDuplicates,
   phaseLabel,
   startDuplicates,
@@ -21,7 +25,14 @@ import {
   type DuplicateGroup,
   type DuplicateReport,
 } from '../lib/duplicates';
-import { invalidate, KEY_DUPLICATES, peekCached, setCached } from '../lib/scanCache';
+import {
+  invalidate,
+  KEY_DUPLICATES,
+  peekCached,
+  scanCacheDescriptor,
+  setCached,
+} from '../lib/scanCache';
+import { invalidateFilesystemCachesSoon } from '../lib/cacheInvalidation';
 import {
   commitDelete,
   graveyardStats,
@@ -47,13 +58,17 @@ const VISIBLE_GROUPS_STEP = 50;
 // hard cap on files inside one card. node_modules can hit 100+ copies,
 // "show all N" expansion keeps the card scannable
 const FILES_PER_GROUP_PREVIEW = 8;
+const DUPLICATE_SCAN_OPTS = { minBytes: DEFAULT_MIN_BYTES };
 
 export default function Duplicates() {
-  const cachedInitial = peekCached<DuplicateReport>(KEY_DUPLICATES) ?? null;
+  const cacheKey = scanCacheDescriptor(KEY_DUPLICATES, DUPLICATE_SCAN_OPTS, {
+    rootPath: '~',
+  });
+  const cachedInitial = peekCached<DuplicateReport>(cacheKey) ?? null;
   const [response, setResponseRaw] = createSignal<DuplicateReport | null>(cachedInitial);
   const setResponse = (next: DuplicateReport | null) => {
     setResponseRaw(next);
-    if (next) setCached(KEY_DUPLICATES, next);
+    if (next?.phase === 'done') setCached(cacheKey, next);
   };
   const [scanning, setScanning] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -65,54 +80,89 @@ export default function Duplicates() {
   const [disabled, setDisabled] = createSignal<Set<string>>(new Set<string>());
   const [visibleCount, setVisibleCount] = createSignal(VISIBLE_GROUPS_STEP);
 
-  let currentHandle: string | null = null;
   let unsubscribe: (() => void) | null = null;
+  let activeHandleId: string | null = null;
+  let disposed = false;
 
-  const stopWalk = async () => {
-    if (currentHandle) {
-      try {
-        await cancelDuplicates(currentHandle);
-        await forgetDuplicates(currentHandle);
-      } catch {
-        // best-effort
-      }
-      currentHandle = null;
-    }
+  const finishWalk = (id: string, r: DuplicateReport) => {
+    if (activeHandleId !== id) return;
+    activeHandleId = null;
+    setResponse(r);
+    setScanning(false);
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
     }
+    void forgetDuplicates(id);
   };
 
-  const startWalk = async () => {
-    await stopWalk();
+  const detachWalk = async (cancelActive: boolean = false): Promise<void> => {
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    if (cancelActive && activeHandleId) {
+      const id = activeHandleId;
+      activeHandleId = null;
+      await cancelDuplicates(id).catch(() => {});
+      await forgetDuplicates(id).catch(() => {});
+    }
+  };
+
+  const startWalk = async (reset: boolean = true) => {
+    if (disposed) return;
+    await detachWalk(true);
+    if (disposed) return;
     setError(null);
     setScanning(true);
-    invalidate(KEY_DUPLICATES);
-    setResponseRaw(null);
-    setDisabled(new Set<string>());
-    setVisibleCount(VISIBLE_GROUPS_STEP);
+    if (reset) {
+      invalidate(cacheKey);
+      setResponseRaw(null);
+      setDisabled(new Set<string>());
+      setVisibleCount(VISIBLE_GROUPS_STEP);
+    }
     try {
-      unsubscribe = await subscribeDuplicates({
-        onProgress: (r) => setResponse(r),
-        onDone: (r) => {
-          setResponse(r);
-          setScanning(false);
+      const handle = await startDuplicates(DUPLICATE_SCAN_OPTS);
+      if (disposed) {
+        await cancelDuplicates(handle.id).catch(() => {});
+        await forgetDuplicates(handle.id).catch(() => {});
+        return;
+      }
+      activeHandleId = handle.id;
+      const nextUnsubscribe = await subscribeDuplicates(handle.id, {
+        onProgress: (r) => {
+          if (disposed) return;
+          if (activeHandleId === handle.id) setResponse(r);
         },
+        onDone: (r) => finishWalk(handle.id, r),
       });
-      const handle = await startDuplicates({});
-      currentHandle = handle.id;
+      if (disposed || activeHandleId !== handle.id) {
+        nextUnsubscribe();
+        if (disposed) {
+          activeHandleId = null;
+          await cancelDuplicates(handle.id).catch(() => {});
+          await forgetDuplicates(handle.id).catch(() => {});
+        }
+        return;
+      }
+      unsubscribe = nextUnsubscribe;
+      const terminal = await duplicatesSnapshot(handle.id);
+      if (!disposed && terminal) finishWalk(handle.id, terminal);
     } catch (e) {
+      if (disposed) return;
       setError(String(e));
       setScanning(false);
     }
   };
 
-  if (!cachedInitial) {
-    void startWalk();
-  }
+  onMount(() => {
+    if (!cachedInitial || cachedInitial.phase !== 'done') {
+      void startWalk(true);
+    }
+  });
   onCleanup(() => {
-    void stopWalk();
+    disposed = true;
+    void detachWalk(true);
   });
 
   // seed selection once we have actual groups. progress events carry
@@ -210,6 +260,7 @@ export default function Duplicates() {
       const result = await commitDelete(plan.token);
       setCommitResult(result);
       setPendingPlan(null);
+      invalidateFilesystemCachesSoon(KEY_DUPLICATES);
       // rescan so freshly-emptied groups drop out
       void startWalk();
       refetchStats();
@@ -234,6 +285,7 @@ export default function Duplicates() {
               r.bytesRestored,
             )}).`,
       );
+      invalidateFilesystemCachesSoon(KEY_DUPLICATES);
       void startWalk();
       refetchStats();
     } catch (e) {
@@ -398,6 +450,15 @@ export default function Duplicates() {
                 aria-live="polite"
               >
                 <span>Scanned {formatCount(r().totalFilesScanned)} files</span>
+                <Show when={r().phase !== 'done'}>
+                  <span>·</span>
+                  <span>
+                    <span class="num" style={{ color: 'var(--safai-fg-1)' }}>
+                      {formatCount(r().candidatesRemaining)}
+                    </span>{' '}
+                    candidates
+                  </span>
+                </Show>
                 <span>·</span>
                 <span>{formatCount(r().totalGroups)} duplicate groups</span>
                 <Show when={allGroups().length > visibleCount()}>
@@ -411,8 +472,17 @@ export default function Duplicates() {
                 </Show>
                 <span>·</span>
                 <span>{Math.max(1, Math.round(r().durationMs))} ms</span>
+                <Show when={r().phase === 'done'}>
+                  <span>·</span>
+                  <CacheFreshness
+                    cacheKey={cacheKey}
+                    version={r()}
+                    disabled={scanning()}
+                    onRescan={() => void startWalk()}
+                  />
+                </Show>
                 <span>·</span>
-                <span>≥ 1 MB files only</span>
+                <span>matching candidates ≥ 1 MB</span>
                 <span>·</span>
                 <span
                   title="Package-manager + build-tool directories are skipped so installer-managed files don't look like duplicates."
@@ -523,7 +593,7 @@ function HeroStrip(props: { response: DuplicateReport | null; scanning: boolean 
             across {formatCount(groups())} duplicate group{groups() === 1 ? '' : 's'}
           </div>
           <Show when={props.scanning}>
-            <ScanningPill />
+            <ScanningPill phase={props.response?.phase} />
           </Show>
         </div>
       </div>
@@ -531,7 +601,8 @@ function HeroStrip(props: { response: DuplicateReport | null; scanning: boolean 
   );
 }
 
-function ScanningPill() {
+function ScanningPill(props: { phase?: DuplicateReport['phase'] }) {
+  const label = () => (props.phase ? phaseLabel(props.phase) : 'Scanning');
   return (
     <div
       style={{
@@ -555,10 +626,9 @@ function ScanningPill() {
           height: '6px',
           'border-radius': '50%',
           background: 'var(--safai-cyan)',
-          animation: 'safai-shimmer 1.2s ease-in-out infinite',
         }}
       />
-      Hashing
+      {label()}
     </div>
   );
 }
@@ -822,75 +892,109 @@ function EmptyState() {
   );
 }
 
-function SkeletonGroup() {
-  return (
-    <div
-      class="safai-card"
-      style={{
-        height: '180px',
-        'flex-shrink': 0,
-        background:
-          'linear-gradient(90deg, var(--safai-bg-2) 0%, var(--safai-bg-3) 50%, var(--safai-bg-2) 100%)',
-        'background-size': '200% 100%',
-        animation: 'safai-shimmer 1.4s ease-in-out infinite',
-      }}
-    />
-  );
-}
-
 function ScanningCard(props: { response: DuplicateReport | null }) {
   const phase = () => props.response?.phase;
   const label = () => (phase() ? phaseLabel(phase()!) : 'Starting scan');
   const files = () => props.response?.totalFilesScanned ?? 0;
-  const remaining = () => props.response?.candidatesRemaining ?? 0;
+  const candidates = () => props.response?.candidatesRemaining ?? 0;
+  const stage = () => {
+    switch (phase()) {
+      case 'size-grouped':
+        return 1;
+      case 'head-hashed':
+        return 2;
+      default:
+        return 0;
+    }
+  };
   return (
-    <div>
-      <div
-        class="safai-card"
-        style={{
-          padding: '22px 26px',
-          display: 'flex',
-          'align-items': 'center',
-          gap: '18px',
-          'margin-bottom': '10px',
-          border: '1px solid oklch(0.82 0.14 200 / 0.3)',
-          background:
-            'linear-gradient(90deg, var(--safai-bg-2) 0%, var(--safai-bg-3) 50%, var(--safai-bg-2) 100%)',
-          'background-size': '200% 100%',
-          animation: 'safai-shimmer 2.2s ease-in-out infinite',
-        }}
-      >
-        <Suds size={48} mood="happy" float />
-        <div style={{ flex: 1, 'min-width': 0 }}>
+    <div
+      class="safai-card"
+      style={{
+        padding: '22px 26px',
+        display: 'flex',
+        'align-items': 'center',
+        gap: '18px',
+        border: '1px solid oklch(0.82 0.14 200 / 0.3)',
+        background: 'var(--safai-bg-2)',
+        'flex-shrink': 0,
+      }}
+    >
+      <Suds size={48} mood="happy" float />
+      <div style={{ flex: 1, 'min-width': 0 }}>
+        <div
+          style={{
+            display: 'flex',
+            'align-items': 'center',
+            gap: '10px',
+            'margin-bottom': '6px',
+            'flex-wrap': 'wrap',
+          }}
+        >
           <div
             style={{
               'font-size': '10px',
               color: 'var(--safai-cyan)',
               'letter-spacing': '0.12em',
               'text-transform': 'uppercase',
-              'margin-bottom': '4px',
             }}
           >
             {label()}
           </div>
-          <div style={{ 'font-size': '13px', color: 'var(--safai-fg-1)' }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: '6px',
+              'align-items': 'center',
+            }}
+          >
+            <StageDot active={stage() === 0} complete={stage() > 0} />
+            <StageDot active={stage() === 1} complete={stage() > 1} />
+            <StageDot active={stage() === 2} complete={false} />
+          </div>
+        </div>
+        <div style={{ 'font-size': '13px', color: 'var(--safai-fg-1)' }}>
+          <Show when={props.response} fallback={<span>Preparing file walk</span>}>
             Walked{' '}
             <span class="num" style={{ color: 'var(--safai-fg-0)' }}>
               {formatCount(files())}
             </span>{' '}
             files
+            <Show when={phase() === 'walking'}>
+              {' · '}
+              <span class="num" style={{ color: 'var(--safai-fg-0)' }}>
+                {formatCount(candidates())}
+              </span>{' '}
+              eligible
+            </Show>
             <Show when={phase() === 'size-grouped' || phase() === 'head-hashed'}>
               {' · '}
               <span class="num" style={{ color: 'var(--safai-fg-0)' }}>
-                {formatCount(remaining())}
+                {formatCount(candidates())}
               </span>{' '}
               candidates remaining
             </Show>
-          </div>
+          </Show>
         </div>
       </div>
-      <For each={Array.from({ length: 3 })}>{() => <SkeletonGroup />}</For>
     </div>
+  );
+}
+
+function StageDot(props: { active: boolean; complete: boolean }) {
+  return (
+    <span
+      style={{
+        width: '26px',
+        height: '4px',
+        'border-radius': '999px',
+        background: props.complete
+          ? 'var(--safai-cyan)'
+          : props.active
+            ? 'oklch(0.82 0.14 200 / 0.55)'
+            : 'var(--safai-bg-4)',
+      }}
+    />
   );
 }
 

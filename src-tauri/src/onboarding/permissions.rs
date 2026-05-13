@@ -121,9 +121,7 @@ fn detect_mac_files(home: &Path) -> PermissionStatus {
     {
         match std::fs::read_dir(home.join("Desktop")) {
             Ok(_) => PermissionStatus::Granted,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                PermissionStatus::Denied
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => PermissionStatus::Denied,
             Err(_) => PermissionStatus::Unknown,
         }
     }
@@ -166,10 +164,7 @@ pub fn open_settings(kind: PermissionKind) -> Result<(), String> {
         let _ = url;
         // no safai-relevant deep-link on linux. surface an error so
         // future UI can say "nothing to do"
-        Err(format!(
-            "deep-linking {:?} is not supported on Linux",
-            kind,
-        ))
+        Err(format!("deep-linking {:?} is not supported on Linux", kind,))
     }
 }
 

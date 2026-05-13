@@ -14,9 +14,8 @@
 //!
 //! # concurrency
 //!
-//! browsers scan concurrently via `std::thread::scope`, same pattern as //! per-browser category work is sequential, but each `sum_target` uses jwalk
-//! which pulls from rayon's global pool. so 4 browsers x 5 categories = 20
-//! sequential sums interleaved across threads, each fanned through rayon.
+//! browsers scan sequentially. per-browser category work is sequential, and
+//! each subtree sum already uses jwalk's bounded Rayon pool.
 //!
 //! # errors
 //!
@@ -32,6 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use super::super::fs_guard;
 use super::catalog::{
     catalog_for, platform_tag, BrowserCatalogEntry, BrowserId, Os, PrivacyCategoryId,
     PrivacyCategorySpec, ProfileMode,
@@ -107,16 +107,10 @@ pub fn scan_privacy(home: &Path, os: Os) -> PrivacyReport {
     let started = std::time::Instant::now();
     let catalog = catalog_for(os, home);
 
-    let reports: Vec<BrowserReport> = std::thread::scope(|s| {
-        let handles: Vec<_> = catalog
-            .iter()
-            .map(|spec| s.spawn(|| scan_browser(home, spec)))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| panic_placeholder()))
-            .collect()
-    });
+    let reports: Vec<BrowserReport> = catalog
+        .iter()
+        .map(|spec| scan_browser(home, spec))
+        .collect();
 
     let total_bytes = reports.iter().map(|r| r.bytes).sum();
     let total_items = reports.iter().map(|r| r.items).sum();
@@ -141,8 +135,7 @@ fn scan_browser(home: &Path, spec: &BrowserCatalogEntry) -> BrowserReport {
     //   single-profile:  any home-relative path exists
     let mut available = !profiles.is_empty() || spec.roots.iter().any(|r| r.exists());
 
-    let mut categories: Vec<PrivacyCategoryReport> =
-        Vec::with_capacity(spec.categories.len());
+    let mut categories: Vec<PrivacyCategoryReport> = Vec::with_capacity(spec.categories.len());
     let mut browser_bytes = 0u64;
     let mut browser_items = 0u64;
     let mut any_category_had_files = false;
@@ -151,7 +144,7 @@ fn scan_browser(home: &Path, spec: &BrowserCatalogEntry) -> BrowserReport {
         let targets = resolve_targets(home, spec, cat, &profiles);
         let mut details: Vec<PrivacyTarget> = targets
             .into_iter()
-            .filter_map(|(abs, profile)| stat_target(&abs, &profile))
+            .filter_map(|(abs, profile)| stat_target(home, &abs, &profile))
             .collect();
 
         details.sort_by(|a, b| b.bytes.cmp(&a.bytes));
@@ -253,8 +246,7 @@ pub fn is_profile_dir(mode: ProfileMode, name: &str) -> bool {
             // System Profile = sign-in state, not user data. skip.
             // Guest Profile = ephemeral, skip.
             name == "Default"
-                || (name.starts_with("Profile ")
-                    && name[8..].chars().all(|c| c.is_ascii_digit()))
+                || (name.starts_with("Profile ") && name[8..].chars().all(|c| c.is_ascii_digit()))
         }
         ProfileMode::FirefoxLike => {
             // firefox: <random>.<channel> like abc.default-release.
@@ -341,13 +333,17 @@ fn resolve_targets(
 }
 
 /// None for missing. catalog is fuzzy on purpose, non-existent entries are normal.
-fn stat_target(abs: &Path, profile: &str) -> Option<PrivacyTarget> {
+fn stat_target(home: &Path, abs: &Path, profile: &str) -> Option<PrivacyTarget> {
+    let home_dev = fs_guard::root_device_id(home);
     // symlink_metadata so symlinks are classified, not followed. a symlinked
     // Cache/ could point outside the browser tree.
     let meta = fs::symlink_metadata(abs).ok()?;
     if meta.file_type().is_symlink() {
         // skip entirely, don't want the symlink's own byte count and definitely
         // don't want to follow it
+        return None;
+    }
+    if !fs_guard::is_on_root_device(home_dev, &meta) {
         return None;
     }
     if meta.is_file() {
@@ -360,7 +356,7 @@ fn stat_target(abs: &Path, profile: &str) -> Option<PrivacyTarget> {
         });
     }
     if meta.is_dir() {
-        let (bytes, files, mtime) = sum_subtree(abs);
+        let (bytes, files, mtime) = sum_subtree(abs, home_dev);
         if files == 0 && bytes == 0 {
             return None;
         }
@@ -378,7 +374,7 @@ fn stat_target(abs: &Path, profile: &str) -> Option<PrivacyTarget> {
 /// recursive sum via jwalk. no symlink follow, a profile's service-worker dir
 /// routinely symlinks into the system WebKit cache on mac, which would over-
 /// report bytes and leak out of the browser tree.
-fn sum_subtree(dir: &Path) -> (u64, u64, Option<u64>) {
+fn sum_subtree(dir: &Path, root_dev: Option<fs_guard::DeviceId>) -> (u64, u64, Option<u64>) {
     let mut bytes = 0u64;
     let mut files = 0u64;
     let mut newest: Option<u64> = None;
@@ -386,6 +382,15 @@ fn sum_subtree(dir: &Path) -> (u64, u64, Option<u64>) {
     for entry in jwalk::WalkDir::new(dir)
         .skip_hidden(false)
         .follow_links(false)
+        .process_read_dir(move |_depth, _path, _state, children| {
+            children.retain(|res| match res {
+                Ok(entry) => match entry.metadata() {
+                    Ok(meta) => fs_guard::is_on_root_device(root_dev, &meta),
+                    Err(_) => true,
+                },
+                Err(_) => true,
+            });
+        })
     {
         let Ok(entry) = entry else { continue };
         let Ok(meta) = entry.metadata() else { continue };
@@ -413,22 +418,6 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// used when a browser scan thread panics. keeps wire shape intact so UI sees
-/// a zeroed entry instead of a missing one.
-fn panic_placeholder() -> BrowserReport {
-    BrowserReport {
-        id: BrowserId::Chrome,
-        label: String::new(),
-        icon: String::new(),
-        root: String::new(),
-        available: false,
-        profiles: Vec::new(),
-        bytes: 0,
-        items: 0,
-        categories: Vec::new(),
-    }
 }
 
 #[cfg(test)]
@@ -462,8 +451,7 @@ mod tests {
     /// 2-profile chrome + 1 firefox profile + safari install
     fn synth_mac_home(dir: &TempDir) -> PathBuf {
         let home = dir.path().to_path_buf();
-        let chrome =
-            "Library/Application Support/Google/Chrome";
+        let chrome = "Library/Application Support/Google/Chrome";
         let firefox = "Library/Application Support/Firefox/Profiles";
         make_tree(
             &home,
@@ -474,16 +462,28 @@ mod tests {
                 (&format!("{chrome}/Default/Code Cache/js/index"), 256 * 1024),
                 (&format!("{chrome}/Default/Cookies"), 64 * 1024),
                 (&format!("{chrome}/Default/History"), 320 * 1024),
-                (&format!("{chrome}/Default/Local Storage/leveldb/000003.log"), 8 * 1024),
+                (
+                    &format!("{chrome}/Default/Local Storage/leveldb/000003.log"),
+                    8 * 1024,
+                ),
                 // chrome Profile 1
                 (&format!("{chrome}/Profile 1/Cache/data_0"), 128 * 1024),
                 (&format!("{chrome}/Profile 1/Cookies"), 16 * 1024),
                 // chrome System Profile, must be skipped
                 (&format!("{chrome}/System Profile/Cache/data_0"), 999 * 1024),
                 // firefox
-                (&format!("{firefox}/abc.default-release/cache2/entries/data"), 4 * 1024 * 1024),
-                (&format!("{firefox}/abc.default-release/cookies.sqlite"), 64 * 1024),
-                (&format!("{firefox}/abc.default-release/places.sqlite"), 512 * 1024),
+                (
+                    &format!("{firefox}/abc.default-release/cache2/entries/data"),
+                    4 * 1024 * 1024,
+                ),
+                (
+                    &format!("{firefox}/abc.default-release/cookies.sqlite"),
+                    64 * 1024,
+                ),
+                (
+                    &format!("{firefox}/abc.default-release/places.sqlite"),
+                    512 * 1024,
+                ),
                 // firefox housekeeping, must not count as profile
                 (&format!("{firefox}/Crash Reports/events/abc"), 1024),
                 (&format!("{firefox}/profiles.ini"), 512),
@@ -554,12 +554,10 @@ mod tests {
         let want = (1024 * 1024) + (512 * 1024) + (256 * 1024) + (128 * 1024);
         assert_eq!(cache.bytes, want as u64);
         // System Profile's 999KiB must not count
-        assert!(
-            !cache
-                .targets
-                .iter()
-                .any(|t| t.path.contains("System Profile"))
-        );
+        assert!(!cache
+            .targets
+            .iter()
+            .any(|t| t.path.contains("System Profile")));
     }
 
     #[test]
@@ -754,7 +752,10 @@ mod tests {
             // real Default profile
             make_tree(
                 &home,
-                &[("Library/Application Support/Google/Chrome/Default/Cache/x", 1024)],
+                &[(
+                    "Library/Application Support/Google/Chrome/Default/Cache/x",
+                    1024,
+                )],
             );
             // symlinked 'Profile 1' pointing somewhere huge outside
             let outside = tmp.path().parent().unwrap().join("safai-privacy-evil");
@@ -824,8 +825,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
         // one FirefoxLike profile
-        let prof =
-            "Library/Application Support/Firefox/Profiles/abc.default-release";
+        let prof = "Library/Application Support/Firefox/Profiles/abc.default-release";
         let mut files: Vec<(String, usize)> = Vec::new();
         // Sessions has up to 5 rel_to_profile entries, naturally bounded.
         // can't exceed 200 without lots of categories, and sum_subtree folds
@@ -876,10 +876,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = synth_mac_home(&tmp);
         let report = scan_privacy(&home, Os::Mac);
-        let want: Vec<BrowserId> = catalog_for(Os::Mac, &home)
-            .iter()
-            .map(|b| b.id)
-            .collect();
+        let want: Vec<BrowserId> = catalog_for(Os::Mac, &home).iter().map(|b| b.id).collect();
         let got: Vec<BrowserId> = report.browsers.iter().map(|b| b.id).collect();
         assert_eq!(got, want);
     }
@@ -966,14 +963,23 @@ mod tests {
             &home,
             &[
                 // config root -> cookies + places
-                (&format!(".config/mozilla/firefox/{profile}/cookies.sqlite"), 64 * 1024),
-                (&format!(".config/mozilla/firefox/{profile}/places.sqlite"), 512 * 1024),
+                (
+                    &format!(".config/mozilla/firefox/{profile}/cookies.sqlite"),
+                    64 * 1024,
+                ),
+                (
+                    &format!(".config/mozilla/firefox/{profile}/places.sqlite"),
+                    512 * 1024,
+                ),
                 (
                     &format!(".config/mozilla/firefox/{profile}/sessionstore.jsonlz4"),
                     4 * 1024,
                 ),
                 // cache root -> cache2
-                (&format!(".cache/mozilla/firefox/{profile}/cache2/entries/data"), 4 * 1024 * 1024),
+                (
+                    &format!(".cache/mozilla/firefox/{profile}/cache2/entries/data"),
+                    4 * 1024 * 1024,
+                ),
                 // housekeeping, must not be enumerated
                 (".config/mozilla/firefox/profiles.ini", 256),
                 (".cache/mozilla/firefox/Crash Reports/events/x", 128),
@@ -987,7 +993,10 @@ mod tests {
             .find(|b| b.id == BrowserId::Firefox)
             .expect("firefox browser entry present");
 
-        assert!(firefox.available, "firefox should be detected on XDG-split host");
+        assert!(
+            firefox.available,
+            "firefox should be detected on XDG-split host"
+        );
         // profile seen in multiple roots, counted once
         assert_eq!(firefox.profiles, vec![profile.to_string()]);
 
@@ -1098,7 +1107,10 @@ mod tests {
             &home,
             &[
                 ("snap/chromium/common/chromium/Default/Cookies", 4 * 1024),
-                ("snap/chromium/common/chromium/Default/Cache/data_0", 512 * 1024),
+                (
+                    "snap/chromium/common/chromium/Default/Cache/data_0",
+                    512 * 1024,
+                ),
             ],
         );
         let report = scan_privacy(&home, Os::Linux);
@@ -1261,7 +1273,11 @@ mod tests {
             .iter()
             .find(|b| b.id == BrowserId::Firefox)
             .unwrap();
-        assert!(ff.root.contains(".config/mozilla/firefox"), "got root={}", ff.root);
+        assert!(
+            ff.root.contains(".config/mozilla/firefox"),
+            "got root={}",
+            ff.root
+        );
     }
 
     #[test]

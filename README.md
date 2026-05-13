@@ -6,7 +6,7 @@
 
 Open-source system cleaner for mac, linux and windows. built on tauri + solid.
 
-Finds junk, duplicates, big old files, browser crud, startup hogs, and malware.
+Finds junk, duplicates, big old files, browser crud, startup hogs, and local malware signature or heuristic hits.
 nothing gets hard-deleted, everything goes to a safai-owned graveyard so you can
 restore the last clean if you change your mind.
 

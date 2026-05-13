@@ -1,9 +1,10 @@
 //! on-disk persistence for OnboardingState.
 //!
 //! lives at `<data_dir>/state.json`. writes are atomic: serialise to
-//! tmp in same dir, fsync if we can, then rename. concurrent readers
-//! see full old or full new, never a tear. crash between tmp write and
-//! rename leaves the original untouched.
+//! tmp in same dir, fsync if we can, then rename. on Unix we also fsync
+//! the containing directory after rename so the directory entry itself is
+//! durable. concurrent readers see full old or full new, never a tear.
+//! crash between tmp write and rename leaves the original untouched.
 //!
 //! reads are tolerant of any realistic corruption: truncated JSON,
 //! partial overwrite, newer-version file, older-version with missing
@@ -45,9 +46,8 @@ pub fn load(data_dir: &Path) -> Result<OnboardingState, OnboardingError> {
             path.display()
         )));
     }
-    let s = fs::read_to_string(&path).map_err(|e| {
-        OnboardingError::Io(format!("read {}: {e}", path.display()))
-    })?;
+    let s = fs::read_to_string(&path)
+        .map_err(|e| OnboardingError::Io(format!("read {}: {e}", path.display())))?;
     let mut state: OnboardingState = serde_json::from_str(&s)
         .map_err(|e| OnboardingError::Parse(format!("parse state.json: {e}")))?;
     // forward-compat: newer-version file = drop and re-onboard.
@@ -98,9 +98,7 @@ pub fn save(data_dir: &Path, state: &OnboardingState) -> Result<(), OnboardingEr
             .write(true)
             .create_new(true)
             .open(&tmp_path)
-            .map_err(|e| {
-                OnboardingError::Io(format!("open tmp {}: {e}", tmp_path.display()))
-            })?;
+            .map_err(|e| OnboardingError::Io(format!("open tmp {}: {e}", tmp_path.display())))?;
         f.write_all(&bytes)
             .map_err(|e| OnboardingError::Io(format!("write tmp: {e}")))?;
         // best-effort fsync. ramfs under test harnesses may fail, data
@@ -113,6 +111,8 @@ pub fn save(data_dir: &Path, state: &OnboardingState) -> Result<(), OnboardingEr
         let _ = fs::remove_file(&tmp_path);
         OnboardingError::Io(format!("rename state file: {e}"))
     })?;
+    sync_parent_dir(&final_path)
+        .map_err(|e| OnboardingError::Io(format!("sync state dir: {e}")))?;
     Ok(())
 }
 
@@ -167,6 +167,19 @@ fn now_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -285,8 +298,8 @@ mod tests {
                 if let Ok(s) = fs::read_to_string(reader_path.join(STATE_FILE_NAME)) {
                     if !s.is_empty() {
                         // must always parse
-                        let _: OnboardingState = serde_json::from_str(&s)
-                            .expect("torn read produced unparseable state");
+                        let _: OnboardingState =
+                            serde_json::from_str(&s).expect("torn read produced unparseable state");
                         ok_reads += 1;
                     }
                 }
@@ -374,11 +387,7 @@ mod tests {
         // fresh tmp must not get removed. std has no portable mtime
         // backdate so we only check the keep-fresh half here.
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(
-            tmp.path().join("state.json.tmp.0.0"),
-            b"stale contents",
-        )
-        .unwrap();
+        fs::write(tmp.path().join("state.json.tmp.0.0"), b"stale contents").unwrap();
         fs::write(
             tmp.path().join("state.json.tmp.999.999"),
             b"recent contents",

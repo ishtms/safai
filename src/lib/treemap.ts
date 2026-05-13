@@ -3,6 +3,7 @@
 
 import { invoke, listen } from './ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import { createEnvelopeGate, type IpcEventEnvelope } from './events';
 
 export interface TreemapRect {
   x: number;
@@ -36,6 +37,7 @@ export interface TreemapResponse {
   totalFiles: number;
   tiles: TreemapTile[];
   biggest: BiggestFolder[];
+  scannedAt: number;
   durationMs: number;
 }
 
@@ -89,6 +91,7 @@ function demoTreemap(root: string): TreemapResponse {
       fileCount: 1000,
       depth: 1 + (i % 2),
     })),
+    scannedAt: Math.floor(Date.now() / 1000),
     durationMs: 0,
   };
 }
@@ -122,6 +125,10 @@ export function forgetTreemap(handleId: string): Promise<boolean> {
   return invoke<boolean>('forget_treemap', { handleId }, () => false);
 }
 
+export function treemapSnapshot(handleId: string): Promise<TreemapResponse | null> {
+  return invoke<TreemapResponse | null>('treemap_snapshot', { handleId }, () => null);
+}
+
 // try to serve a treemap from the backend's in-memory cache without
 // touching fs. hit = instant (clone + layout, ram-local). miss = null,
 // caller falls back to startTreemap. used for drill-down + back-nav so
@@ -148,21 +155,26 @@ export interface TreemapSubscriptions {
   onDone?: (resp: TreemapResponse) => void;
 }
 
-// subscribe to both treemap channels. returns one teardown that
-// cancels everything. rust only emits one walk at a time so we don't
-// filter by handle id here
+// subscribe to both treemap channels. returns one teardown. the shared
+// envelope gate filters by handle id and drops stale sequence numbers.
 export async function subscribeTreemap(
+  handleId: string,
   subs: TreemapSubscriptions,
 ): Promise<UnlistenFn> {
   const unlisteners: UnlistenFn[] = [];
+  const accept = createEnvelopeGate(handleId);
   if (subs.onProgress) {
     unlisteners.push(
-      await listen<TreemapResponse>(CHANNEL_TREEMAP_PROGRESS, (r) => subs.onProgress!(r)),
+      await listen<IpcEventEnvelope<TreemapResponse>>(CHANNEL_TREEMAP_PROGRESS, (ev) => {
+        accept(ev, (payload) => subs.onProgress!(payload));
+      }),
     );
   }
   if (subs.onDone) {
     unlisteners.push(
-      await listen<TreemapResponse>(CHANNEL_TREEMAP_DONE, (r) => subs.onDone!(r)),
+      await listen<IpcEventEnvelope<TreemapResponse>>(CHANNEL_TREEMAP_DONE, (ev) => {
+        accept(ev, (payload) => subs.onDone!(payload));
+      }),
     );
   }
   return () => {

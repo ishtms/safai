@@ -4,19 +4,33 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
 } from 'solid-js';
-import { invalidate, KEY_LARGE_OLD, peekCached, setCached } from '../lib/scanCache';
+import {
+  invalidate,
+  KEY_LARGE_OLD,
+  peekCached,
+  scanCacheDescriptor,
+  setCached,
+} from '../lib/scanCache';
+import { invalidateFilesystemCachesSoon } from '../lib/cacheInvalidation';
 import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
 import { Icon } from '../components/Icon';
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal';
+import { VirtualList } from '../components/VirtualList';
+import { CacheFreshness } from '../components/CacheFreshness';
 import {
   bucketColour,
   bucketFor,
   bucketLabel,
   cancelLargeOld,
+  DEFAULT_MAX_RESULTS,
+  DEFAULT_MIN_BYTES,
+  DEFAULT_MIN_DAYS_IDLE,
   forgetLargeOld,
+  largeOldSnapshot,
   phaseLabel,
   revealInFileManager,
   startLargeOld,
@@ -47,6 +61,14 @@ import {
 // through the shared cleaner like Junk/Duplicates.
 
 const TABLE_PAGE_STEP = 200;
+const TABLE_VIRTUAL_THRESHOLD = 240;
+const TABLE_ROW_HEIGHT = 42;
+const SCATTER_POINT_LIMIT = 800;
+const LARGE_OLD_SCAN_OPTS = {
+  minBytes: DEFAULT_MIN_BYTES,
+  minDaysIdle: DEFAULT_MIN_DAYS_IDLE,
+  maxResults: DEFAULT_MAX_RESULTS,
+};
 
 type SortField = 'bytes' | 'idleDays' | 'path' | 'extension';
 type SortDir = 'asc' | 'desc';
@@ -55,12 +77,15 @@ export default function LargeOld() {
   // seed from cache so tab-switching doesn't re-kick the walk. first
   // visit returns undefined and we start a scan; later visits hydrate
   // instantly from the last completed report
-  const cachedInitial = peekCached<LargeOldReport>(KEY_LARGE_OLD) ?? null;
+  const cacheKey = scanCacheDescriptor(KEY_LARGE_OLD, LARGE_OLD_SCAN_OPTS, {
+    rootPath: '~',
+  });
+  const cachedInitial = peekCached<LargeOldReport>(cacheKey) ?? null;
   const [response, setResponseRaw] = createSignal<LargeOldReport | null>(cachedInitial);
   // wrap setResponse so the module cache stays in sync with on-screen state
   const setResponse = (next: LargeOldReport | null) => {
     setResponseRaw(next);
-    if (next) setCached(KEY_LARGE_OLD, next);
+    if (next?.phase === 'done') setCached(cacheKey, next);
   };
   const [scanning, setScanning] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -71,55 +96,90 @@ export default function LargeOld() {
   const [sortDir, setSortDir] = createSignal<SortDir>('desc');
   const [bucketFilter, setBucketFilter] = createSignal<Bucket | 'all'>('all');
 
-  let currentHandle: string | null = null;
   let unsubscribe: (() => void) | null = null;
+  let activeHandleId: string | null = null;
+  let disposed = false;
 
-  const stopWalk = async () => {
-    if (currentHandle) {
-      try {
-        await cancelLargeOld(currentHandle);
-        await forgetLargeOld(currentHandle);
-      } catch {
-        // best-effort
-      }
-      currentHandle = null;
-    }
+  const finishWalk = (id: string, r: LargeOldReport) => {
+    if (activeHandleId !== id) return;
+    activeHandleId = null;
+    setResponse(r);
+    setScanning(false);
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
     }
+    void forgetLargeOld(id);
   };
 
-  const startWalk = async () => {
-    await stopWalk();
+  const detachWalk = async (cancelActive: boolean = false): Promise<void> => {
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    if (cancelActive && activeHandleId) {
+      const id = activeHandleId;
+      activeHandleId = null;
+      await cancelLargeOld(id).catch(() => {});
+      await forgetLargeOld(id).catch(() => {});
+    }
+  };
+
+  const startWalk = async (reset: boolean = true) => {
+    if (disposed) return;
+    await detachWalk(true);
+    if (disposed) return;
     setError(null);
     setScanning(true);
-    invalidate(KEY_LARGE_OLD);
-    setResponseRaw(null);
-    setSelected(new Set<string>());
-    setVisibleRows(TABLE_PAGE_STEP);
+    if (reset) {
+      invalidate(cacheKey);
+      setResponseRaw(null);
+      setSelected(new Set<string>());
+      setVisibleRows(TABLE_PAGE_STEP);
+    }
     try {
-      unsubscribe = await subscribeLargeOld({
-        onProgress: (r) => setResponse(r),
-        onDone: (r) => {
-          setResponse(r);
-          setScanning(false);
+      const handle = await startLargeOld(LARGE_OLD_SCAN_OPTS);
+      if (disposed) {
+        await cancelLargeOld(handle.id).catch(() => {});
+        await forgetLargeOld(handle.id).catch(() => {});
+        return;
+      }
+      activeHandleId = handle.id;
+      const nextUnsubscribe = await subscribeLargeOld(handle.id, {
+        onProgress: (r) => {
+          if (disposed) return;
+          if (activeHandleId === handle.id) setResponse(r);
         },
+        onDone: (r) => finishWalk(handle.id, r),
       });
-      const handle = await startLargeOld({});
-      currentHandle = handle.id;
+      if (disposed || activeHandleId !== handle.id) {
+        nextUnsubscribe();
+        if (disposed) {
+          activeHandleId = null;
+          await cancelLargeOld(handle.id).catch(() => {});
+          await forgetLargeOld(handle.id).catch(() => {});
+        }
+        return;
+      }
+      unsubscribe = nextUnsubscribe;
+      const terminal = await largeOldSnapshot(handle.id);
+      if (!disposed && terminal) finishWalk(handle.id, terminal);
     } catch (e) {
+      if (disposed) return;
       setError(String(e));
       setScanning(false);
     }
   };
 
   // only walk on first visit. later mounts render the cached report
-  if (!cachedInitial) {
-    void startWalk();
-  }
+  onMount(() => {
+    if (!cachedInitial || cachedInitial.phase !== 'done') {
+      void startWalk(!cachedInitial);
+    }
+  });
   onCleanup(() => {
-    void stopWalk();
+    disposed = true;
+    void detachWalk(true);
   });
 
   const allFiles = () => response()?.files ?? [];
@@ -225,6 +285,7 @@ export default function LargeOld() {
         return next;
       });
       void startWalk();
+      invalidateFilesystemCachesSoon(KEY_LARGE_OLD);
       refetchStats();
     } catch (e) {
       setPlanError(String(e));
@@ -247,6 +308,7 @@ export default function LargeOld() {
               r.bytesRestored,
             )}).`,
       );
+      invalidateFilesystemCachesSoon(KEY_LARGE_OLD);
       void startWalk();
       refetchStats();
     } catch (e) {
@@ -445,6 +507,15 @@ export default function LargeOld() {
               </span>
               <span>·</span>
               <span>{Math.max(1, Math.round(r().durationMs))} ms</span>
+              <Show when={r().phase === 'done'}>
+                <span>·</span>
+                <CacheFreshness
+                  cacheKey={cacheKey}
+                  version={r()}
+                  disabled={scanning()}
+                  onRescan={() => void startWalk()}
+                />
+              </Show>
               <Show when={(stats()?.batchCount ?? 0) > 0}>
                 <span>·</span>
                 <span>
@@ -630,6 +701,9 @@ function ScatterPanel(props: ScatterProps) {
     if (!h) return null;
     return props.files.find((f) => f.path === h) ?? null;
   });
+  const plottedFiles = createMemo(() =>
+    boundedScatterFiles(props.files, props.selected, props.hovered, SCATTER_POINT_LIMIT),
+  );
 
   return (
     <div
@@ -660,14 +734,19 @@ function ScatterPanel(props: ScatterProps) {
             Size × Age
           </div>
           <div style={{ 'font-size': '13px', color: 'var(--safai-fg-1)' }}>
-            <span class="num">{formatCount(props.files.length)}</span> points ·
+            <span class="num">{formatCount(plottedFiles().length)}</span>
+            <Show when={plottedFiles().length < props.files.length}>
+              {' '}
+              of <span class="num">{formatCount(props.files.length)}</span>
+            </Show>{' '}
+            points ·
             bigger up, older right. Click a point to toggle selection.
           </div>
         </div>
       </div>
 
       <PlotCanvas
-        files={props.files}
+        files={plottedFiles()}
         bounds={bounds()}
         xTicks={xTicks()}
         yTicks={yTicks()}
@@ -969,6 +1048,37 @@ function logNormValue(value: number, min: number, max: number): number {
   return Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
 }
 
+function boundedScatterFiles(
+  files: FileSummary[],
+  selected: Set<string>,
+  hovered: string | null,
+  limit: number,
+): FileSummary[] {
+  if (files.length <= limit) return files;
+  const picked = new Map<string, FileSummary>();
+  const add = (f: FileSummary | undefined) => {
+    if (!f || picked.size >= limit) return;
+    picked.set(f.path, f);
+  };
+
+  if (hovered) add(files.find((f) => f.path === hovered));
+  for (const f of files) {
+    if (selected.has(f.path)) add(f);
+    if (picked.size >= limit) return Array.from(picked.values());
+  }
+
+  const remaining = Math.max(1, limit - picked.size);
+  const stride = Math.max(1, Math.ceil(files.length / remaining));
+  for (let i = 0; i < files.length && picked.size < limit; i += stride) {
+    add(files[i]);
+  }
+  for (const f of files) {
+    if (picked.size >= limit) break;
+    add(f);
+  }
+  return Array.from(picked.values());
+}
+
 // bucket legend / filter
 
 function BucketLegend(props: {
@@ -1150,123 +1260,146 @@ function FilesTable(props: {
         />
         <span style={{ 'text-align': 'right' }}>Actions</span>
       </div>
-      <For each={props.files}>
-        {(f) => {
-          const isSel = () => props.selected.has(f.path);
-          const isHov = () => props.hovered === f.path;
-          const bucket = bucketFor(f.extension);
-          return (
-            <div
-              style={{
-                display: 'grid',
-                'grid-template-columns': '32px 1fr 110px 90px 130px 90px',
-                'align-items': 'center',
-                padding: '10px 14px',
-                'border-bottom': '1px solid var(--safai-line)',
-                background: isSel()
-                  ? 'color-mix(in oklab, var(--safai-cyan) 8%, transparent)'
-                  : isHov()
-                    ? 'var(--safai-bg-2)'
-                    : 'transparent',
-                cursor: 'pointer',
-              }}
-              onClick={() => props.onToggle(f.path)}
-              onMouseEnter={() => props.onHover(f.path)}
-              onMouseLeave={() => props.onHover(null)}
-            >
-              <div
-                class={`safai-check safai-check--${isSel() ? 'on' : 'off'}`}
-                role="checkbox"
-                aria-checked={isSel()}
-                tabindex={0}
-                onKeyDown={(e) => {
-                  if (e.key === ' ' || e.key === 'Enter') {
-                    e.preventDefault();
-                    props.onToggle(f.path);
-                  }
-                }}
-              >
-                <Show when={isSel()}>
-                  <Icon
-                    name="check"
-                    size={9}
-                    color="oklch(0.18 0.02 240)"
-                    strokeWidth={2.2}
-                  />
-                </Show>
-              </div>
-              <div
-                class="mono"
-                style={{
-                  'font-size': '12px',
-                  color: 'var(--safai-fg-1)',
-                  'min-width': 0,
-                  'white-space': 'nowrap',
-                  overflow: 'hidden',
-                  'text-overflow': 'ellipsis',
-                }}
-                title={f.path}
-              >
-                {truncateMiddle(f.path, 80)}
-              </div>
-              <div
-                class="num"
-                style={{
-                  'font-size': '12px',
-                  'text-align': 'right',
-                  'font-variant-numeric': 'tabular-nums',
-                  color: 'var(--safai-fg-0)',
-                }}
-              >
-                {formatBytes(f.bytes)}
-              </div>
-              <div style={{ 'font-size': '11px', color: 'var(--safai-fg-2)' }}>
-                <span
-                  aria-hidden="true"
-                  style={{
-                    display: 'inline-block',
-                    width: '6px',
-                    height: '6px',
-                    'border-radius': '50%',
-                    background: bucketColour(bucket),
-                    'margin-right': '6px',
-                    'vertical-align': 'middle',
-                  }}
-                />
-                {f.extension ? f.extension : bucketLabel(bucket).toLowerCase()}
-              </div>
-              <div
-                class="num"
-                style={{
-                  'font-size': '12px',
-                  'text-align': 'right',
-                  color: 'var(--safai-fg-1)',
-                  'font-variant-numeric': 'tabular-nums',
-                }}
-              >
-                {formatCount(f.idleDays)} d
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  'justify-content': 'flex-end',
-                  gap: '6px',
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <button
-                  class="safai-btn safai-btn--ghost"
-                  title="Reveal in file manager"
-                  onClick={() => props.onReveal(f.path)}
-                  style={{ height: '22px', padding: '0 6px' }}
-                >
-                  <Icon name="eye" size={11} />
-                </button>
-              </div>
-            </div>
-          );
+      <VirtualList
+        items={props.files}
+        itemHeight={TABLE_ROW_HEIGHT}
+        maxHeight={560}
+        ariaLabel="Large and old files"
+        threshold={TABLE_VIRTUAL_THRESHOLD}
+      >
+        {(f) => (
+          <LargeOldFileRow
+            file={f}
+            selected={props.selected.has(f.path)}
+            hovered={props.hovered === f.path}
+            onToggle={() => props.onToggle(f.path)}
+            onReveal={() => props.onReveal(f.path)}
+            onHover={(hovered) => props.onHover(hovered ? f.path : null)}
+          />
+        )}
+      </VirtualList>
+    </div>
+  );
+}
+
+function LargeOldFileRow(props: {
+  file: FileSummary;
+  selected: boolean;
+  hovered: boolean;
+  onToggle: () => void;
+  onReveal: () => void;
+  onHover: (hovered: boolean) => void;
+}) {
+  const bucket = () => bucketFor(props.file.extension);
+  return (
+    <div
+      style={{
+        display: 'grid',
+        'grid-template-columns': '32px 1fr 110px 90px 130px 90px',
+        'align-items': 'center',
+        height: `${TABLE_ROW_HEIGHT}px`,
+        padding: '0 14px',
+        'border-bottom': '1px solid var(--safai-line)',
+        background: props.selected
+          ? 'color-mix(in oklab, var(--safai-cyan) 8%, transparent)'
+          : props.hovered
+            ? 'var(--safai-bg-2)'
+            : 'transparent',
+        cursor: 'pointer',
+      }}
+      onClick={props.onToggle}
+      onMouseEnter={() => props.onHover(true)}
+      onMouseLeave={() => props.onHover(false)}
+    >
+      <div
+        class={`safai-check safai-check--${props.selected ? 'on' : 'off'}`}
+        role="checkbox"
+        aria-checked={props.selected}
+        tabindex={0}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            props.onToggle();
+          }
         }}
-      </For>
+      >
+        <Show when={props.selected}>
+          <Icon
+            name="check"
+            size={9}
+            color="oklch(0.18 0.02 240)"
+            strokeWidth={2.2}
+          />
+        </Show>
+      </div>
+      <div
+        class="mono"
+        style={{
+          'font-size': '12px',
+          color: 'var(--safai-fg-1)',
+          'min-width': 0,
+          'white-space': 'nowrap',
+          overflow: 'hidden',
+          'text-overflow': 'ellipsis',
+        }}
+        title={props.file.path}
+      >
+        {truncateMiddle(props.file.path, 80)}
+      </div>
+      <div
+        class="num"
+        style={{
+          'font-size': '12px',
+          'text-align': 'right',
+          'font-variant-numeric': 'tabular-nums',
+          color: 'var(--safai-fg-0)',
+        }}
+      >
+        {formatBytes(props.file.bytes)}
+      </div>
+      <div style={{ 'font-size': '11px', color: 'var(--safai-fg-2)' }}>
+        <span
+          aria-hidden="true"
+          style={{
+            display: 'inline-block',
+            width: '6px',
+            height: '6px',
+            'border-radius': '50%',
+            background: bucketColour(bucket()),
+            'margin-right': '6px',
+            'vertical-align': 'middle',
+          }}
+        />
+        {props.file.extension ? props.file.extension : bucketLabel(bucket()).toLowerCase()}
+      </div>
+      <div
+        class="num"
+        style={{
+          'font-size': '12px',
+          'text-align': 'right',
+          color: 'var(--safai-fg-1)',
+          'font-variant-numeric': 'tabular-nums',
+        }}
+      >
+        {formatCount(props.file.idleDays)} d
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          'justify-content': 'flex-end',
+          gap: '6px',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          class="safai-btn safai-btn--ghost"
+          title="Reveal in file manager"
+          onClick={props.onReveal}
+          style={{ height: '22px', padding: '0 6px' }}
+        >
+          <Icon name="eye" size={11} />
+        </button>
+      </div>
     </div>
   );
 }

@@ -15,7 +15,8 @@
 //! * `top_by_memory` / `top_by_cpu` truncate to `top_n`. top_n==0 yields
 //!   empty lists (activity screen only cares about the full process list)
 
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::types::{ActivitySnapshot, CpuSnapshot, MemorySnapshot, ProcessRow};
@@ -32,7 +33,22 @@ pub trait SystemProbe: Send {
     fn swap_used(&self) -> u64;
     fn cpu_per_core(&self) -> Vec<f32>;
     fn processes(&self) -> Vec<ProcessRow>;
+    fn hydrate_process_details(&self, _rows: &mut [ProcessRow]) {}
+
+    fn process_detail(&mut self, pid: u32) -> Option<ProcessRow> {
+        self.refresh();
+        let mut rows = self.processes();
+        let idx = rows.iter().position(|row| row.pid == pid)?;
+        let mut row = rows.swap_remove(idx);
+        self.hydrate_process_details(std::slice::from_mut(&mut row));
+        Some(row)
+    }
 }
+
+/// Activity.tsx renders the first 100 table rows. Hydrate a little extra so
+/// sort/filter changes can reuse command text without cloning every cmdline on
+/// every tick.
+const PROCESS_DETAIL_LIMIT: usize = 128;
 
 /// refreshes probe then reads every surface. top_n==0 disables the top lists
 pub fn sample(probe: &mut dyn SystemProbe, top_n: usize, tick: u64) -> ActivitySnapshot {
@@ -50,12 +66,11 @@ pub fn sample(probe: &mut dyn SystemProbe, top_n: usize, tick: u64) -> ActivityS
     };
     let cpu = CpuSnapshot::from_per_core(probe.cpu_per_core());
     let mut processes = probe.processes();
-    sort_by_memory(&mut processes);
     let process_count = processes.len();
-    let top_by_memory = take_top(&processes, top_n);
-    let mut by_cpu = processes.clone();
-    sort_by_cpu(&mut by_cpu);
-    let top_by_cpu = take_top(&by_cpu, top_n);
+    let mut top_by_memory = top_by_memory_bounded(&processes, top_n);
+    let mut top_by_cpu = top_by_cpu_bounded(&processes, top_n);
+    sort_by_memory(&mut processes);
+    hydrate_display_details(probe, &mut processes, &mut top_by_memory, &mut top_by_cpu);
 
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -74,6 +89,40 @@ pub fn sample(probe: &mut dyn SystemProbe, top_n: usize, tick: u64) -> ActivityS
     }
 }
 
+/// Recompute the derived top lists for an already captured snapshot.
+/// The full process list is retained and already memory-sorted by `sample`.
+pub fn retop_snapshot(mut snap: ActivitySnapshot, top_n: usize) -> ActivitySnapshot {
+    snap.top_by_memory = top_by_memory_bounded(&snap.processes, top_n);
+    snap.top_by_cpu = top_by_cpu_bounded(&snap.processes, top_n);
+    snap
+}
+
+fn hydrate_display_details(
+    probe: &dyn SystemProbe,
+    processes: &mut [ProcessRow],
+    top_by_memory: &mut [ProcessRow],
+    top_by_cpu: &mut [ProcessRow],
+) {
+    let detail_len = processes.len().min(PROCESS_DETAIL_LIMIT);
+    probe.hydrate_process_details(&mut processes[..detail_len]);
+
+    let top_pids: HashSet<u32> = top_by_memory
+        .iter()
+        .chain(top_by_cpu.iter())
+        .map(|row| row.pid)
+        .collect();
+    if !top_pids.is_empty() {
+        for row in processes.iter_mut().skip(detail_len) {
+            if top_pids.contains(&row.pid) {
+                probe.hydrate_process_details(std::slice::from_mut(row));
+            }
+        }
+    }
+
+    probe.hydrate_process_details(top_by_memory);
+    probe.hydrate_process_details(top_by_cpu);
+}
+
 fn sort_by_memory(rows: &mut [ProcessRow]) {
     rows.sort_by(|a, b| {
         b.memory_bytes
@@ -84,29 +133,122 @@ fn sort_by_memory(rows: &mut [ProcessRow]) {
 
 fn sort_by_cpu(rows: &mut [ProcessRow]) {
     rows.sort_by(|a, b| {
-        // NaN never compares Greater, so NaN cpu_percent sinks. without this
-        // the top-CPU card could briefly show "NaN% - firefox" while sysinfo
-        // warms up
-        match b.cpu_percent.partial_cmp(&a.cpu_percent) {
-            Some(o) => o.then_with(|| a.pid.cmp(&b.pid)),
-            None => {
-                let a_nan = a.cpu_percent.is_nan();
-                let b_nan = b.cpu_percent.is_nan();
-                match (a_nan, b_nan) {
-                    (true, false) => Ordering::Greater,
-                    (false, true) => Ordering::Less,
-                    _ => a.pid.cmp(&b.pid),
-                }
-            }
-        }
+        cmp_cpu_value(b.cpu_percent, a.cpu_percent).then_with(|| a.pid.cmp(&b.pid))
     });
 }
 
-fn take_top(rows: &[ProcessRow], n: usize) -> Vec<ProcessRow> {
+fn top_by_memory_bounded(rows: &[ProcessRow], n: usize) -> Vec<ProcessRow> {
     if n == 0 {
         return Vec::new();
     }
-    rows.iter().take(n).cloned().collect()
+    let mut heap: BinaryHeap<Reverse<MemoryHeapItem>> =
+        BinaryHeap::with_capacity(n.saturating_add(1));
+    for (index, row) in rows.iter().enumerate() {
+        let item = MemoryHeapItem {
+            memory_bytes: row.memory_bytes,
+            pid: row.pid,
+            index,
+        };
+        if heap.len() < n {
+            heap.push(Reverse(item));
+        } else if heap.peek().is_some_and(|worst| item > worst.0) {
+            heap.pop();
+            heap.push(Reverse(item));
+        }
+    }
+    let mut out: Vec<ProcessRow> = heap
+        .into_iter()
+        .map(|Reverse(item)| rows[item.index].clone())
+        .collect();
+    sort_by_memory(&mut out);
+    out
+}
+
+fn top_by_cpu_bounded(rows: &[ProcessRow], n: usize) -> Vec<ProcessRow> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut heap: BinaryHeap<Reverse<CpuHeapItem>> = BinaryHeap::with_capacity(n.saturating_add(1));
+    for (index, row) in rows.iter().enumerate() {
+        let item = CpuHeapItem {
+            cpu_percent: row.cpu_percent,
+            pid: row.pid,
+            index,
+        };
+        if heap.len() < n {
+            heap.push(Reverse(item));
+        } else if heap.peek().is_some_and(|worst| item > worst.0) {
+            heap.pop();
+            heap.push(Reverse(item));
+        }
+    }
+    let mut out: Vec<ProcessRow> = heap
+        .into_iter()
+        .map(|Reverse(item)| rows[item.index].clone())
+        .collect();
+    sort_by_cpu(&mut out);
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoryHeapItem {
+    memory_bytes: u64,
+    pid: u32,
+    index: usize,
+}
+
+impl Ord for MemoryHeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.memory_bytes
+            .cmp(&other.memory_bytes)
+            .then_with(|| other.pid.cmp(&self.pid))
+            .then_with(|| other.index.cmp(&self.index))
+    }
+}
+
+impl PartialOrd for MemoryHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuHeapItem {
+    cpu_percent: f32,
+    pid: u32,
+    index: usize,
+}
+
+impl Eq for CpuHeapItem {}
+
+impl PartialEq for CpuHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.cpu_percent.to_bits() == other.cpu_percent.to_bits()
+            && self.pid == other.pid
+            && self.index == other.index
+    }
+}
+
+impl Ord for CpuHeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_cpu_value(self.cpu_percent, other.cpu_percent)
+            .then_with(|| other.pid.cmp(&self.pid))
+            .then_with(|| other.index.cmp(&self.index))
+    }
+}
+
+impl PartialOrd for CpuHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn cmp_cpu_value(a: f32, b: f32) -> Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+    }
 }
 
 // ------------------- sysinfo-backed implementation -------------------
@@ -121,6 +263,10 @@ impl SysinfoProbe {
     pub fn new() -> Self {
         let sys = sysinfo::System::new();
         Self { sys }
+    }
+
+    pub fn process_detail(&mut self, pid: u32) -> Option<ProcessRow> {
+        <Self as SystemProbe>::process_detail(self, pid)
     }
 }
 
@@ -177,27 +323,49 @@ impl SystemProbe for SysinfoProbe {
             // None for a real process, only platform-agnostic classifier
             // sysinfo exposes
             .filter(|(_pid, p)| p.thread_kind().is_none())
-            .map(|(pid, p)| {
-                let cmd_parts = p.cmd();
-                let command = cmd_parts
-                    .iter()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                ProcessRow {
-                    pid: pid.as_u32(),
-                    parent_pid: p.parent().map(|pp| pp.as_u32()),
-                    name: p.name().to_string_lossy().into_owned(),
-                    command,
-                    user: resolve_user(&self.sys, p),
-                    cpu_percent: p.cpu_usage(),
-                    memory_bytes: p.memory(),
-                    start_time: p.start_time(),
-                    threads: None,
-                }
-            })
+            .map(|(pid, p)| lightweight_process_row(pid, p))
             .collect()
     }
+
+    fn hydrate_process_details(&self, rows: &mut [ProcessRow]) {
+        for row in rows {
+            if let Some((_pid, process)) = self
+                .sys
+                .processes()
+                .iter()
+                .find(|(pid, p)| pid.as_u32() == row.pid && p.thread_kind().is_none())
+            {
+                hydrate_process_row(&self.sys, process, row);
+            }
+        }
+    }
+}
+
+fn lightweight_process_row(pid: &sysinfo::Pid, p: &sysinfo::Process) -> ProcessRow {
+    ProcessRow {
+        pid: pid.as_u32(),
+        parent_pid: p.parent().map(|pp| pp.as_u32()),
+        name: p.name().to_string_lossy().into_owned(),
+        command: String::new(),
+        user: None,
+        cpu_percent: p.cpu_usage(),
+        memory_bytes: p.memory(),
+        start_time: p.start_time(),
+        threads: None,
+    }
+}
+
+fn hydrate_process_row(sys: &sysinfo::System, p: &sysinfo::Process, row: &mut ProcessRow) {
+    row.command = process_command(p);
+    row.user = resolve_user(sys, p);
+}
+
+fn process_command(p: &sysinfo::Process) -> String {
+    p.cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// we don't ship sysinfo's `user` feature flag (adds a platform user DB
@@ -324,9 +492,7 @@ mod tests {
     #[test]
     fn sample_top_by_memory_truncates() {
         let mut probe = MockProbe::new();
-        probe.procs = (1..=20)
-            .map(|i| row(i, "p", i as u64 * 10, 0.0))
-            .collect();
+        probe.procs = (1..=20).map(|i| row(i, "p", i as u64 * 10, 0.0)).collect();
         let snap = sample(&mut probe, 5, 0);
         assert_eq!(snap.top_by_memory.len(), 5);
         // largest first: pid 20 down to 16

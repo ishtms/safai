@@ -26,6 +26,7 @@ import {
   type ScanState,
 } from '../lib/scanner';
 import { junkScan } from '../lib/junk';
+import { CACHE_JUNK, setCached } from '../lib/scanCache';
 import { formatBytes, formatCount, formatDuration, splitBytes, truncateMiddle } from '../lib/format';
 
 // which scan we're fronting. ?kind= so Smart Scan's Rescan + System Junk's
@@ -60,45 +61,89 @@ export default function SmartScanRunning(): JSX.Element {
   let unsubscribe: (() => void) | null = null;
   let pollInterval: ReturnType<typeof setInterval> | null = null;
   let syncAnimTimer: ReturnType<typeof setInterval> | null = null;
+  let completionTimer: ReturnType<typeof setTimeout> | null = null;
   // set in onCleanup + stop() so in-flight sync scan promises don't stomp
   // signals or fire a late navigate after the user left
   let disposed = false;
+
+  const finishStreamingScan = (id: string, p: ScanProgress) => {
+    if (handleId() !== id) return;
+    setProgress(p);
+    if (p.state === 'done') {
+      if (completionTimer) return;
+      // show final state for a beat, then pop back
+      completionTimer = window.setTimeout(() => {
+        if (disposed) return;
+        setHandleId(null);
+        void forgetScan(id);
+        navigate('/scan', { replace: true });
+      }, 1200);
+    } else if (p.state === 'cancelled') {
+      setHandleId(null);
+      void forgetScan(id);
+    }
+  };
 
   onMount(async () => {
     if (kind === 'junk') {
       await runSyncScan({
         label: 'System Junk',
         run: junkScan,
-        onDone: () => navigate('/junk', { replace: true }),
+        onDone: (result) => {
+          setCached(CACHE_JUNK, result);
+          navigate('/junk', { replace: true });
+        },
       });
       return;
     }
 
     try {
       const handle = await startScan();
+      if (disposed) {
+        await cancelScan(handle.id).catch(() => {});
+        await forgetScan(handle.id).catch(() => {});
+        return;
+      }
       setHandleId(handle.id);
       setRoots(handle.roots);
 
-      unsubscribe = await subscribeScan(handle.id, {
+      const nextUnsubscribe = await subscribeScan(handle.id, {
         onEvent: (ev) => {
+          if (disposed) return;
           // prepend, newest-first without reversing on every paint
           setLog((prev) => {
             const next = [ev, ...prev];
             return next.length > LOG_MAX ? next.slice(0, LOG_MAX) : next;
           });
         },
-        onProgress: (p) => setProgress(p),
+        onProgress: (p) => {
+          if (disposed) return;
+          if (handleId() === handle.id) setProgress(p);
+        },
         onDone: (p) => {
-          setProgress(p);
-          // show final state for a beat, then pop back if not cancelled
-          if (p.state === 'done') {
-            window.setTimeout(() => {
-              void forgetScan(handle.id);
-              navigate('/scan', { replace: true });
-            }, 1200);
-          }
+          if (disposed) return;
+          finishStreamingScan(handle.id, p);
         },
       });
+      if (disposed || handleId() !== handle.id) {
+        nextUnsubscribe();
+        if (disposed) {
+          setHandleId(null);
+          await cancelScan(handle.id).catch(() => {});
+          await forgetScan(handle.id).catch(() => {});
+        }
+        return;
+      }
+      unsubscribe = nextUnsubscribe;
+
+      const initialSnap = await scanSnapshot(handle.id);
+      if (!disposed && initialSnap) {
+        if (initialSnap.state === 'done' || initialSnap.state === 'cancelled') {
+          finishStreamingScan(handle.id, initialSnap);
+        } else if (handleId() === handle.id) {
+          setProgress(initialSnap);
+        }
+      }
 
       // safety net for missed events (tab backgrounded when tauri fired),
       // poll every second
@@ -106,9 +151,15 @@ export default function SmartScanRunning(): JSX.Element {
         const id = handleId();
         if (!id) return;
         const snap = await scanSnapshot(id);
-        if (snap) setProgress(snap);
+        if (!snap) return;
+        if (snap.state === 'done' || snap.state === 'cancelled') {
+          finishStreamingScan(id, snap);
+        } else {
+          setProgress(snap);
+        }
       }, 1000);
     } catch (e) {
+      if (disposed) return;
       setError(String(e));
     }
   });
@@ -173,10 +224,17 @@ export default function SmartScanRunning(): JSX.Element {
     unsubscribe?.();
     if (pollInterval) clearInterval(pollInterval);
     if (syncAnimTimer) clearInterval(syncAnimTimer);
+    if (completionTimer) clearTimeout(completionTimer);
     const id = handleId();
-    if (id) {
-      // best-effort, completed scan just frees the slot
-      void cancelScan(id).finally(() => void forgetScan(id));
+    if (kind === 'smart' && id) {
+      setHandleId(null);
+      if (progress().state === 'done') {
+        void forgetScan(id);
+      } else {
+        void cancelScan(id).finally(() => {
+          void forgetScan(id);
+        });
+      }
     }
   });
 
@@ -207,6 +265,7 @@ export default function SmartScanRunning(): JSX.Element {
   const stop = async () => {
     const id = handleId();
     if (id) {
+      setHandleId(null);
       await cancelScan(id);
       await forgetScan(id);
     }

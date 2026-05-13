@@ -30,10 +30,8 @@
 //!
 //! symlinks never followed or hashed. hardlinks to the same inode hash
 //! identically but aren't real dupes (deleting one frees nothing), so we
-//! dedup at (device, inode) on unix. windows would need
-//! GetFileInformationByHandle, not in scope for worst case
-//! hardlinks surface as a group and "keep one / delete rest" reclaims
-//! nothing, which the cleaner's graveyard restore handles.
+//! dedup at filesystem identity: (device, inode) on unix and
+//! (volume serial, file index) on Windows.
 
 pub mod pipeline;
 pub mod stream;
@@ -49,7 +47,7 @@ pub use pipeline::{find_duplicates, DuplicateGroup, FindError, IGNORED_DIR_NAMES
 #[allow(unused_imports)]
 pub use pipeline::DuplicateFile;
 pub use stream::{
-    next_dupes_handle_id, run_dupes_stream, DupesController, DupesEmit, DupesHandle,
+    next_dupes_handle_id, run_dupes_stream, DupesController, DupesEmit, DupesHandle, DupesInsert,
     DupesRegistry, ScanPhase,
 };
 
@@ -64,7 +62,8 @@ pub const DEFAULT_MIN_BYTES: u64 = 1024 * 1024;
 pub const MAX_CANDIDATES_PER_BUCKET: usize = 10_000;
 
 /// wire response. returned by the sync API + emitted as `dupes://progress`
-/// (per phase) and `dupes://done` (terminal) by the streaming variant.
+/// (walking counters + phase changes) and `dupes://done` (terminal) by the
+/// streaming variant.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateReport {
@@ -73,7 +72,8 @@ pub struct DuplicateReport {
     /// confirmed groups, sorted desc by wasted_bytes. empty on progress
     /// events before final grouping
     pub groups: Vec<DuplicateGroup>,
-    /// regular files the walker considered (post min-bytes filter)
+    /// regular files the walker saw. files below min_bytes are counted here
+    /// but skipped before hashing.
     pub total_files_scanned: u64,
     /// groups.len(), duplicated so UI doesn't recompute
     pub total_groups: u64,
@@ -84,18 +84,15 @@ pub struct DuplicateReport {
     /// current pipeline phase. UI shows concrete status per phase.
     /// terminal done event sets this to [`ScanPhase::Done`]
     pub phase: ScanPhase,
-    /// files still in play for next phase. starts at full count, size
-    /// pass drops unique-size singletons, head pass narrows, final count
-    /// ends up in total_groups
+    /// files still in play for next phase. while walking this is the
+    /// min_bytes-eligible candidate count, then size/head passes narrow it.
+    /// terminal done uses total_groups.
     pub candidates_remaining: u64,
 }
 
 /// sync entry point. used by tests + `find_duplicates` Tauri command.
 /// streaming variant in [`stream`] reuses [`pipeline::find_duplicates`].
-pub fn scan_duplicates(
-    root: &Path,
-    min_bytes: u64,
-) -> Result<DuplicateReport, FindError> {
+pub fn scan_duplicates(root: &Path, min_bytes: u64) -> Result<DuplicateReport, FindError> {
     let started = Instant::now();
     let (groups, files_scanned) = find_duplicates(root, min_bytes, None)?;
     let wasted: u64 = groups.iter().map(|g| g.wasted_bytes).sum();
@@ -161,7 +158,11 @@ mod tests {
     fn unique_sizes_short_circuit_before_hashing() {
         let tmp = tempfile::tempdir().unwrap();
         for i in 0..30 {
-            write_bytes(tmp.path(), &format!("f{i}.bin"), &payload(i as u8, 1024 + i));
+            write_bytes(
+                tmp.path(),
+                &format!("f{i}.bin"),
+                &payload(i as u8, 1024 + i),
+            );
         }
         let report = scan_duplicates(tmp.path(), 0).unwrap();
         assert!(report.groups.is_empty());
@@ -260,8 +261,7 @@ mod tests {
     #[test]
     fn missing_root_returns_not_found() {
         let err =
-            scan_duplicates(Path::new("/definitely/not/a/path/xyz-safai-dupes"), 0)
-                .unwrap_err();
+            scan_duplicates(Path::new("/definitely/not/a/path/xyz-safai-dupes"), 0).unwrap_err();
         assert!(matches!(err, FindError::NotFound(_)));
     }
 
@@ -285,7 +285,11 @@ mod tests {
         write_bytes(tmp.path(), "m/file.bin", &data);
         let report = scan_duplicates(tmp.path(), 0).unwrap();
         assert_eq!(report.groups.len(), 1);
-        let paths: Vec<&str> = report.groups[0].files.iter().map(|f| f.path.as_str()).collect();
+        let paths: Vec<&str> = report.groups[0]
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
         let mut sorted = paths.clone();
         sorted.sort();
         assert_eq!(paths, sorted);
@@ -320,8 +324,16 @@ mod tests {
         // two project dirs with identical artifacts under
         // node_modules/.../build/intermediates/. exactly what flooded the
         // first real-world run
-        write_bytes(tmp.path(), "projA/node_modules/react/android/build/libreact.a", &data);
-        write_bytes(tmp.path(), "projB/node_modules/react/android/build/libreact.a", &data);
+        write_bytes(
+            tmp.path(),
+            "projA/node_modules/react/android/build/libreact.a",
+            &data,
+        );
+        write_bytes(
+            tmp.path(),
+            "projB/node_modules/react/android/build/libreact.a",
+            &data,
+        );
         // and a pair of real user files outside node_modules
         let photo = payload(9, 12 * 1024);
         write_bytes(tmp.path(), "Pictures/trip.jpg", &photo);
@@ -329,7 +341,12 @@ mod tests {
 
         let report = scan_duplicates(tmp.path(), 0).unwrap();
         // node_modules pair must not surface, only the real photo pair
-        assert_eq!(report.groups.len(), 1, "unexpected groups: {:?}", report.groups);
+        assert_eq!(
+            report.groups.len(),
+            1,
+            "unexpected groups: {:?}",
+            report.groups
+        );
         let group = &report.groups[0];
         assert!(group.files.iter().all(|f| !f.path.contains("node_modules")));
         assert!(group.files.iter().all(|f| f.path.contains("trip.jpg")));
@@ -342,7 +359,10 @@ mod tests {
         write_bytes(tmp.path(), "repo/.git/objects/pack/pack.idx", &data);
         write_bytes(tmp.path(), "repo-mirror/.git/objects/pack/pack.idx", &data);
         let report = scan_duplicates(tmp.path(), 0).unwrap();
-        assert!(report.groups.is_empty(), ".git contents must not be deduplicated");
+        assert!(
+            report.groups.is_empty(),
+            ".git contents must not be deduplicated"
+        );
     }
 
     #[test]
@@ -351,8 +371,16 @@ mod tests {
         let data = payload(3, 8 * 1024);
         write_bytes(tmp.path(), "App/Pods/Target/lib.a", &data);
         write_bytes(tmp.path(), "App2/Pods/Target/lib.a", &data);
-        write_bytes(tmp.path(), "Library/Developer/Xcode/DerivedData/X/Build/lib.o", &data);
-        write_bytes(tmp.path(), "Library/Developer/Xcode/DerivedData/Y/Build/lib.o", &data);
+        write_bytes(
+            tmp.path(),
+            "Library/Developer/Xcode/DerivedData/X/Build/lib.o",
+            &data,
+        );
+        write_bytes(
+            tmp.path(),
+            "Library/Developer/Xcode/DerivedData/Y/Build/lib.o",
+            &data,
+        );
         let report = scan_duplicates(tmp.path(), 0).unwrap();
         assert!(report.groups.is_empty());
     }

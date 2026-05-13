@@ -19,7 +19,7 @@ pub mod stream;
 pub mod tree;
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use serde::Serialize;
 
@@ -27,7 +27,7 @@ pub use cache::TreemapCache;
 pub use layout::{squarify, Rect};
 pub use stream::{
     next_treemap_handle_id, preflight_root, run_treemap_stream, TreemapController, TreemapEmit,
-    TreemapHandle, TreemapRegistry,
+    TreemapHandle, TreemapInsert, TreemapRegistry,
 };
 pub use tree::{build_tree, TreeBuildError, TreeNode};
 
@@ -71,6 +71,7 @@ pub struct TreemapResponse {
     pub tiles: Vec<TreemapTile>,
     /// top-N biggest folders for sidebar
     pub biggest: Vec<BiggestFolder>,
+    pub scanned_at: u64,
     pub duration_ms: u64,
 }
 
@@ -114,8 +115,16 @@ pub fn compute_treemap(
         total_files: tree.file_count,
         tiles,
         biggest,
+        scanned_at: now_unix(),
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+pub(crate) fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// tail-fold: child below MIN_LAID_OUT_FRACTION of parent area, or past
@@ -273,12 +282,8 @@ mod tests {
 
     #[test]
     fn nonexistent_root_returns_error() {
-        let err = compute_treemap(
-            Path::new("/definitely/does/not/exist/safai-t-6-xyz"),
-            4,
-            64,
-        )
-        .unwrap_err();
+        let err = compute_treemap(Path::new("/definitely/does/not/exist/safai-t-6-xyz"), 4, 64)
+            .unwrap_err();
         assert!(matches!(err, TreeBuildError::NotFound(_)));
     }
 
@@ -340,6 +345,7 @@ mod tests {
         let v = serde_json::to_value(&res).unwrap();
         assert!(v.get("totalBytes").is_some());
         assert!(v.get("totalFiles").is_some());
+        assert!(v.get("scannedAt").is_some());
         assert!(v.get("durationMs").is_some());
         if let Some(t) = v["tiles"].as_array().and_then(|a| a.first()) {
             assert!(t.get("fileCount").is_some());

@@ -11,7 +11,6 @@ import { Suds, type SudsMood } from '../components/Suds';
 import { Icon } from '../components/Icon';
 import { OSChip, type OS } from '../components/OSChip';
 import { detectOS } from '../lib/platform';
-import { startScan } from '../lib/scanner';
 import { formatBytes } from '../lib/format';
 import {
   completeOnboarding,
@@ -765,14 +764,6 @@ export default function Onboarding(props: { step: OnboardingStep }) {
   const finish = async (runFirstScan: boolean) => {
     await completeOnboarding();
     if (runFirstScan) {
-      // start the scan before navigating so /scanning's onMount finds
-      // a fresh handle to subscribe to
-      try {
-        await startScan();
-      } catch {
-        // plain vite dev etc - still route in, SmartScanRunning handles
-        // the error state
-      }
       navigate('/scanning');
       return;
     }
@@ -835,4 +826,3 @@ function OnboardingLoader() {
     </div>
   );
 }
-

@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show, onCleanup } from 'solid-js';
+import { createResource, createSignal, For, Show, onCleanup, onMount } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
 import { SafaiToolbar } from '../components/SafaiToolbar';
 import { Suds } from '../components/Suds';
@@ -19,8 +19,10 @@ export default function SmartScan() {
   // formatRelativeTime is pure on now(). 30s tick so "2 min ago" rolls
   // forward without interaction
   const [clock, setClock] = createSignal(Date.now());
-  const tick = setInterval(() => setClock(Date.now()), 30_000);
-  onCleanup(() => clearInterval(tick));
+  onMount(() => {
+    const tick = window.setInterval(() => setClock(Date.now()), 30_000);
+    onCleanup(() => window.clearInterval(tick));
+  });
 
   const totalBytes = () => summary()?.totalBytes ?? 0;
   const totalItems = () => summary()?.totalItems ?? 0;

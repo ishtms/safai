@@ -3,6 +3,7 @@
 
 import { invoke, listen } from './ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import { createEnvelopeGate, type IpcEventEnvelope } from './events';
 
 export interface FileSummary {
   path: string;
@@ -71,6 +72,10 @@ export function forgetLargeOld(handleId: string): Promise<boolean> {
   return invoke<boolean>('forget_large_old', { handleId }, () => false);
 }
 
+export function largeOldSnapshot(handleId: string): Promise<LargeOldReport | null> {
+  return invoke<LargeOldReport | null>('large_old_snapshot', { handleId }, () => null);
+}
+
 export function revealInFileManager(path: string): Promise<void> {
   return invoke<void>(
     'reveal_in_file_manager',
@@ -90,16 +95,24 @@ export interface LargeOldSubscriptions {
 }
 
 export async function subscribeLargeOld(
+  handleId: string,
   subs: LargeOldSubscriptions,
 ): Promise<UnlistenFn> {
   const unlisteners: UnlistenFn[] = [];
+  const accept = createEnvelopeGate(handleId);
   if (subs.onProgress) {
     unlisteners.push(
-      await listen<LargeOldReport>(CHANNEL_PROGRESS, (r) => subs.onProgress!(r)),
+      await listen<IpcEventEnvelope<LargeOldReport>>(CHANNEL_PROGRESS, (ev) => {
+        accept(ev, (payload) => subs.onProgress!(payload));
+      }),
     );
   }
   if (subs.onDone) {
-    unlisteners.push(await listen<LargeOldReport>(CHANNEL_DONE, (r) => subs.onDone!(r)));
+    unlisteners.push(
+      await listen<IpcEventEnvelope<LargeOldReport>>(CHANNEL_DONE, (ev) => {
+        accept(ev, (payload) => subs.onDone!(payload));
+      }),
+    );
   }
   return () => {
     for (const u of unlisteners) {

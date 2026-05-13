@@ -30,6 +30,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::scanner::fs_guard;
+
 use super::BiggestFolder;
 
 /// walk failed before any result. variants reflect preflight checks on root.
@@ -98,8 +100,11 @@ impl BuildNode {
     }
 
     pub(super) fn into_node(self) -> TreeNode {
-        let mut children: Vec<TreeNode> =
-            self.children.into_values().map(BuildNode::into_node).collect();
+        let mut children: Vec<TreeNode> = self
+            .children
+            .into_values()
+            .map(BuildNode::into_node)
+            .collect();
         children.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
         TreeNode {
             name: self.name,
@@ -114,9 +119,53 @@ impl BuildNode {
     /// non-consuming. allocates a TreeNode tree at current state. O(nodes),
     /// cheap because max_depth bounds the tree. called once per progress tick.
     pub(super) fn snapshot(&self) -> TreeNode {
-        let mut children: Vec<TreeNode> =
-            self.children.values().map(BuildNode::snapshot).collect();
+        let mut children: Vec<TreeNode> = self.children.values().map(BuildNode::snapshot).collect();
         children.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+        TreeNode {
+            name: self.name.clone(),
+            path: self.path.to_string_lossy().into_owned(),
+            bytes: self.bytes,
+            file_count: self.file_count,
+            is_dir: self.is_dir,
+            children,
+        }
+    }
+
+    /// non-consuming progress snapshot with a per-node child cap. This keeps
+    /// high-fanout trees from cloning thousands of siblings on every progress
+    /// tick while preserving the largest children that drive the UI.
+    pub(super) fn snapshot_capped(&self, child_cap: usize) -> TreeNode {
+        let mut children: Vec<&BuildNode> = self.children.values().collect();
+        children.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+        let omitted_count = children.len().saturating_sub(child_cap);
+        let omitted_bytes = children
+            .iter()
+            .skip(child_cap)
+            .fold(0u64, |sum, child| sum.saturating_add(child.bytes));
+        let omitted_files = children
+            .iter()
+            .skip(child_cap)
+            .fold(0u64, |sum, child| sum.saturating_add(child.file_count));
+        let children: Vec<TreeNode> = children
+            .into_iter()
+            .take(child_cap)
+            .map(|child| child.snapshot_capped(child_cap))
+            .collect();
+        let mut children = children;
+        if omitted_count > 0 && (omitted_bytes > 0 || omitted_files > 0) {
+            children.push(TreeNode {
+                name: format!("...{omitted_count} more"),
+                path: self
+                    .path
+                    .join("__progress_other__")
+                    .to_string_lossy()
+                    .into_owned(),
+                bytes: omitted_bytes,
+                file_count: omitted_files,
+                is_dir: false,
+                children: Vec::new(),
+            });
+        }
         TreeNode {
             name: self.name.clone(),
             path: self.path.to_string_lossy().into_owned(),
@@ -141,8 +190,7 @@ impl TreeNode {
         // min-heap on bytes, keep N largest by popping smallest
         let mut heap: BinaryHeap<Reverse<(u64, u64, String, String, u32)>> = BinaryHeap::new();
         // (node, depth)
-        let mut stack: Vec<(&TreeNode, u32)> =
-            self.children.iter().map(|c| (c, 1u32)).collect();
+        let mut stack: Vec<(&TreeNode, u32)> = self.children.iter().map(|c| (c, 1u32)).collect();
 
         while let Some((node, depth)) = stack.pop() {
             if node.is_dir && node.bytes > 0 {
@@ -170,13 +218,15 @@ impl TreeNode {
 
         let mut out: Vec<BiggestFolder> = heap
             .into_iter()
-            .map(|Reverse((bytes, file_count, name, path, depth))| BiggestFolder {
-                path,
-                name,
-                bytes,
-                file_count,
-                depth,
-            })
+            .map(
+                |Reverse((bytes, file_count, name, path, depth))| BiggestFolder {
+                    path,
+                    name,
+                    bytes,
+                    file_count,
+                    depth,
+                },
+            )
             .collect();
         out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
         out
@@ -215,9 +265,19 @@ pub fn build_tree(root: &Path, max_depth: usize) -> Result<TreeNode, TreeBuildEr
     // Walk everything under `root`. `follow_links(false)` prevents looping
     // through mount points / recursive symlinks; `skip_hidden(false)`
     // because dotfiles can be arbitrarily large on Linux/mac.
+    let root_dev = fs_guard::root_device_id(root);
     let walker = jwalk::WalkDir::new(root)
         .skip_hidden(false)
-        .follow_links(false);
+        .follow_links(false)
+        .process_read_dir(move |_depth, _path, _state, children| {
+            children.retain(|res| match res {
+                Ok(entry) => match entry.metadata() {
+                    Ok(meta) => fs_guard::is_on_root_device(root_dev, &meta),
+                    Err(_) => true,
+                },
+                Err(_) => true,
+            });
+        });
 
     for entry in walker {
         let Ok(entry) = entry else { continue };
@@ -388,6 +448,26 @@ mod tests {
     }
 
     #[test]
+    fn capped_snapshot_keeps_largest_children() {
+        let mut root = BuildNode::new_dir("root".into(), PathBuf::from("/root"));
+        for idx in 0..10u64 {
+            let rel = PathBuf::from(format!("child-{idx}/file.bin"));
+            insert_file(&mut root, Path::new("/root"), &rel, idx + 1, 2);
+        }
+
+        let snap = root.snapshot_capped(3);
+        assert_eq!(snap.children.len(), 4);
+        assert_eq!(snap.children[0].name, "child-9");
+        assert_eq!(snap.children[1].name, "child-8");
+        assert_eq!(snap.children[2].name, "child-7");
+        assert_eq!(snap.children[3].name, "...7 more");
+        assert_eq!(
+            snap.children.iter().map(|c| c.bytes).sum::<u64>(),
+            snap.bytes
+        );
+    }
+
+    #[test]
     fn symlinks_are_not_followed_or_counted() {
         #[cfg(unix)]
         {
@@ -406,8 +486,7 @@ mod tests {
 
     #[test]
     fn missing_root_returns_not_found() {
-        let err =
-            build_tree(Path::new("/definitely/not/a/path/xyz-safai-6"), 3).unwrap_err();
+        let err = build_tree(Path::new("/definitely/not/a/path/xyz-safai-6"), 3).unwrap_err();
         assert!(matches!(err, TreeBuildError::NotFound(_)));
     }
 
